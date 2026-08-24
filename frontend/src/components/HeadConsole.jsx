@@ -1,148 +1,118 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { socket } from '../socket';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageToggle from './LanguageToggle';
-import TimerModal from './TimerModal';
-import InterruptionModal from './InterruptionModal';
 import MemberDirectoryTab from './MemberDirectoryTab';
 
 export default function HeadConsole() {
     const navigate = useNavigate();
     const { t, toDevanagariDigits, getLocalizedText } = useLanguage();
-    const closeTimeoutRef = useRef(null);
-    const isExpiringRef = useRef(false);
 
-    // Active Tab state: 'floor', 'directory', 'records'
     const [activeTab, setActiveTab] = useState('floor');
 
     const [state, setState] = useState({
         activeSection: 'sunya',
         queues: { sunya: [], aakasmik: [], bishesh: [] },
-        queue: [],
         interruptions: [],
         activeSpeaker: null,
         floorTimer: { duration: 0, endsAt: null, remainingSeconds: 0, isPaused: false },
         savedFloorSpeaker: null,
-        activeInterruption: null,
-        spokenMembers: { sunya: [], aakasmik: [], bishesh: [] }
+        activeInterruption: null
     });
 
-    const [speakerStats, setSpeakerStats] = useState([]);
-    const [displaySpeaker, setDisplaySpeaker] = useState(null);
     const [remainingSecs, setRemainingSecs] = useState(0);
-    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [customMins, setCustomMins] = useState('');
+    const [customSecs, setCustomSecs] = useState('');
 
-    const fetchSpeakerStats = async () => {
+    const [searchSunya, setSearchSunya] = useState('');
+    const [searchAakasmik, setSearchAakasmik] = useState('');
+    const [searchBishesh, setSearchBishesh] = useState('');
+
+    const [speakerStats, setSpeakerStats] = useState([]);
+    const [statsLoading, setStatsLoading] = useState(false);
+    const [searchStats, setSearchStats] = useState('');
+
+    const getApiBase = () => {
+        if (typeof window === 'undefined') return 'http://localhost:3000';
+        const host = window.location.hostname;
+        if (host.includes('devtunnels.ms')) {
+            return window.location.origin.replace('-5173.', '-3000.');
+        }
+        return `http://${host}:3000`;
+    };
+
+    const fetchSpeakerStats = useCallback(async () => {
+        setStatsLoading(true);
         try {
-            const res = await fetch('/api/speaker-stats');
+            const res = await fetch(`${getApiBase()}/api/speaker-stats`);
             if (res.ok) {
                 const data = await res.json();
                 setSpeakerStats(Array.isArray(data) ? data : []);
             }
         } catch (err) {
-            console.error('Error loading speaker stats:', err);
-        }
-    };
-
-    useEffect(() => {
-        const token = localStorage.getItem('adminToken');
-        if (!token) navigate('/admin/login');
-        fetchSpeakerStats();
-    }, [navigate]);
-
-    const handleSignOut = async () => {
-        try {
-            await fetch('/api/logout-clear-session', { method: 'POST' });
-        } catch (err) {
-            console.error('Failed to purge session on logout:', err);
+            console.error('Error fetching speaker stats:', err);
         } finally {
-            localStorage.removeItem('adminToken');
-            navigate('/admin/login');
+            setStatsLoading(false);
         }
-    };
-
-    useEffect(() => {
-        return () => {
-            if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
-        };
     }, []);
 
     useEffect(() => {
         const handleQueueUpdate = (data) => {
             if (data) {
-                setState(prev => ({
-                    ...prev,
-                    ...data,
+                setState({
+                    activeSection: data.activeSection || 'sunya',
                     queues: data.queues || { sunya: [], aakasmik: [], bishesh: [] },
                     interruptions: data.interruptions || [],
+                    activeSpeaker: data.activeSpeaker || null,
                     floorTimer: data.floorTimer || { duration: 0, endsAt: null, remainingSeconds: 0, isPaused: false },
-                    spokenMembers: data.spokenMembers || { sunya: [], aakasmik: [], bishesh: [] }
-                }));
-
-                if (data.activeSpeaker) {
-                    setDisplaySpeaker(data.activeSpeaker);
-                } else {
-                    fetchSpeakerStats();
-                }
+                    savedFloorSpeaker: data.savedFloorSpeaker || null,
+                    activeInterruption: data.activeInterruption || null
+                });
             }
         };
 
         socket.on('queueUpdated', handleQueueUpdate);
         socket.on('speakerStatsUpdated', fetchSpeakerStats);
+        socket.emit('requestStateSync');
 
         return () => {
             socket.off('queueUpdated', handleQueueUpdate);
             socket.off('speakerStatsUpdated', fetchSpeakerStats);
         };
-    }, []);
+    }, [fetchSpeakerStats]);
 
     useEffect(() => {
-        const timer = state.floorTimer || { duration: 0, endsAt: null, remainingSeconds: 0, isPaused: false };
+        if (activeTab === 'records') {
+            fetchSpeakerStats();
+        }
+    }, [activeTab, fetchSpeakerStats]);
+
+    useEffect(() => {
+        const timer = state.floorTimer || {};
         const { endsAt, isPaused, remainingSeconds } = timer;
-        
+
         if (isPaused) {
             setRemainingSecs(remainingSeconds || 0);
             return;
         }
-        
+
         if (!endsAt) {
-            if (!isExpiringRef.current) {
-                setRemainingSecs(0);
-            }
+            setRemainingSecs(0);
             return;
         }
 
-        isExpiringRef.current = false;
-
-        const interval = setInterval(() => {
-            const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+        const updateClock = () => {
+            const diffMs = endsAt - Date.now();
+            const left = Math.max(0, Math.ceil(diffMs / 1000));
             setRemainingSecs(left);
-            
-            if (left <= 0) {
-                clearInterval(interval);
-                isExpiringRef.current = true;
+        };
 
-                if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
-                
-                closeTimeoutRef.current = setTimeout(() => {
-                    setIsModalOpen(false);
-                    isExpiringRef.current = false;
-                    fetchSpeakerStats();
-                }, 5000);
-            }
-        }, 250);
+        updateClock();
+        const interval = setInterval(updateClock, 50);
 
         return () => clearInterval(interval);
     }, [state.floorTimer]);
-
-    const handleManualClear = () => {
-        if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
-        isExpiringRef.current = false;
-        socket.emit('clearActive');
-        setIsModalOpen(false);
-        fetchSpeakerStats();
-    };
 
     const formatClock = (seconds) => {
         const total = Math.max(0, parseInt(seconds || 0, 10));
@@ -151,353 +121,205 @@ export default function HeadConsole() {
         return toDevanagariDigits(`${m}:${s}`);
     };
 
-    const formatDurationReadable = (totalSecs) => {
-        const total = Math.max(0, parseInt(totalSecs || 0, 10));
-        const m = Math.floor(total / 60);
-        const s = total % 60;
-        if (m === 0) return `${toDevanagariDigits(s)}s`;
-        return `${toDevanagariDigits(m)}m ${toDevanagariDigits(s)}s`;
-    };
-
-    const formatRequestedTimeBadge = (item) => {
-        const mins = item?.requestedMinutes || 0;
-        const secs = item?.requestedSeconds || 0;
-        if (mins === 0 && secs === 0) return null;
-        if (secs === 0) return `${toDevanagariDigits(mins)}m`;
+    const formatDuration = (totalSeconds) => {
+        const mins = Math.floor((totalSeconds || 0) / 60);
+        const secs = (totalSeconds || 0) % 60;
         return `${toDevanagariDigits(mins)}m ${toDevanagariDigits(secs)}s`;
     };
 
-    // Precise Bikram Sambat Date Converter
-    const convertToNumericBSDate = (adDateString) => {
-        if (!adDateString) return '--';
-        
-        const parts = String(adDateString).split(' ')[0].split('-');
-        if (parts.length < 3) return '--';
-        
-        const year = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10) - 1;
-        const day = parseInt(parts[2], 10);
-
-        const targetUtc = Date.UTC(year, month, day);
-        const refUtc = Date.UTC(2026, 7, 17); // Aug 17, 2026 = 2083 Bhadra 1
-        
-        const diffDays = Math.round((targetUtc - refUtc) / (1000 * 60 * 60 * 24));
-        const monthDays2083 = [31, 31, 32, 31, 31, 30, 30, 29, 30, 29, 30, 30];
-
-        let curYear = 2083;
-        let curMonth = 4;
-        let curDay = 1;
-        let remaining = diffDays;
-
-        if (remaining >= 0) {
-            while (remaining > 0) {
-                const daysInMonth = monthDays2083[curMonth] || 30;
-                const daysLeft = daysInMonth - curDay;
-
-                if (remaining <= daysLeft) {
-                    curDay += remaining;
-                    remaining = 0;
-                } else {
-                    remaining -= (daysLeft + 1);
-                    curDay = 1;
-                    curMonth++;
-                    if (curMonth > 11) {
-                        curMonth = 0;
-                        curYear++;
-                    }
-                }
-            }
-        } else {
-            while (remaining < 0) {
-                if (Math.abs(remaining) < curDay) {
-                    curDay += remaining;
-                    remaining = 0;
-                } else {
-                    remaining += curDay;
-                    curMonth--;
-                    if (curMonth < 0) {
-                        curMonth = 11;
-                        curYear--;
-                    }
-                    const daysInMonth = monthDays2083[curMonth] || 30;
-                    curDay = daysInMonth;
-                }
-            }
+    const handleSignOut = async () => {
+        try {
+            await fetch(`${getApiBase()}/api/logout-clear-session`, { method: 'POST' });
+        } catch (e) {
+            console.error('Logout error:', e);
         }
-
-        const formattedMonth = String(curMonth + 1).padStart(2, '0');
-        const formattedDay = String(curDay).padStart(2, '0');
-
-        return toDevanagariDigits(`${curYear}-${formattedMonth}-${formattedDay}`);
+        localStorage.removeItem('headToken');
+        navigate('/head-login');
     };
 
-    const renderQueueColumn = (sectionKey, title, themeColor, bgBadge) => {
-        const rawQueues = state.queues || {};
-        const queueList = Array.isArray(rawQueues[sectionKey]) ? rawQueues[sectionKey] : [];
+    const handleNextSpeaker = (section) => {
+        socket.emit('nextSpeaker', section);
+    };
 
-        return (
+    const handleAllowQueued = (section, index) => {
+        socket.emit('allowQueuedSpeaker', { section, index });
+    };
+
+    const handleDenyQueued = (section, index) => {
+        socket.emit('denyQueuedSpeaker', { section, index });
+    };
+
+    const handleAllowInterruption = (index) => {
+        socket.emit('allowInterruption', index);
+    };
+
+    const handleDismissInterruption = (index) => {
+        socket.emit('dismissInterruption', index);
+    };
+
+    const handlePauseResume = () => {
+        if (state.floorTimer.isPaused) {
+            socket.emit('resumeTimer');
+        } else {
+            socket.emit('pauseTimer');
+        }
+    };
+
+    const handleResetTimer = () => {
+        socket.emit('resetTimer');
+    };
+
+    const handleSetTime = (minutes, seconds = 0) => {
+        socket.emit('setSpeakingTime', { minutes, seconds });
+    };
+
+    const handleCustomTimeSubmit = (e) => {
+        e.preventDefault();
+        const m = parseInt(customMins || 0, 10);
+        const s = parseInt(customSecs || 0, 10);
+        if (m > 0 || s > 0) {
+            handleSetTime(m, s);
+            setCustomMins('');
+            setCustomSecs('');
+        }
+    };
+
+    const filterQueue = (list, query) => {
+        const q = (query || '').toLowerCase().trim();
+        if (!q) return list || [];
+        return (list || []).filter(item => {
+            const nameMatch = item.name && item.name.toLowerCase().includes(q);
+            const nameNeMatch = item.name_ne && item.name_ne.includes(q);
+            const idMatch = (item.uniqueId || item.unique_id) && String(item.uniqueId || item.unique_id).toLowerCase().includes(q);
+            const topicMatch = item.topic && item.topic.toLowerCase().includes(q);
+            return nameMatch || nameNeMatch || idMatch || topicMatch;
+        });
+    };
+
+    const qSunya = filterQueue(state.queues?.sunya, searchSunya);
+    const qAakasmik = filterQueue(state.queues?.aakasmik, searchAakasmik);
+    const qBishesh = filterQueue(state.queues?.bishesh, searchBishesh);
+
+    const filteredStats = speakerStats.filter(s => {
+        const q = (searchStats || '').toLowerCase().trim();
+        if (!q) return true;
+        return (s.name && s.name.toLowerCase().includes(q)) || (s.position && s.position.toLowerCase().includes(q));
+    });
+
+    const isInterruption = Boolean(state.activeInterruption);
+    const activeSpk = isInterruption ? state.activeInterruption.speaker : state.activeSpeaker;
+
+    return (
+        <div style={{ maxWidth: '1440px', margin: '0 auto', padding: '24px 20px', color: '#0f172a', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+            {/* Top Navigation Bar with Integrated Tabs */}
             <div style={{
                 background: '#ffffff',
                 borderRadius: '16px',
+                padding: '16px 24px',
+                boxShadow: '0 2px 10px rgba(0,0,0,0.03)',
                 border: '1.5px solid #e2e8f0',
-                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.03)',
                 display: 'flex',
-                flexDirection: 'column',
-                overflow: 'hidden',
-                height: '100%',
-                minHeight: 0
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: '20px'
             }}>
-                {/* Column Header */}
-                <div style={{
-                    padding: '12px 18px',
-                    borderBottom: '1.5px solid #f1f5f9',
-                    borderTop: `4px solid ${themeColor}`,
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    background: '#f8fafc',
-                    flexShrink: 0
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontWeight: 900, fontSize: '15px', color: '#1e293b' }}>{title}</span>
-                        <span style={{
-                            fontSize: '12px',
-                            fontWeight: 900,
-                            padding: '2px 8px',
-                            borderRadius: '9999px',
-                            background: bgBadge,
-                            color: themeColor
-                        }}>
-                            {toDevanagariDigits(queueList.length)}
-                        </span>
-                    </div>
-
-                    {queueList.length > 0 && (
-                        <button
-                            onClick={() => socket.emit('clearSectionQueue', sectionKey)}
-                            style={{
-                                border: 'none',
-                                background: 'transparent',
-                                color: '#94a3b8',
-                                cursor: 'pointer',
-                                fontSize: '12px',
-                                fontWeight: 800,
-                                padding: '4px 6px'
-                            }}
-                        >
-                            {t?.clear || 'Clear'}
-                        </button>
-                    )}
-                </div>
-
-                {/* Column Items */}
-                <div style={{
-                    flex: 1,
-                    overflowY: 'auto',
-                    padding: '10px 14px',
-                    minHeight: 0
-                }}>
-                    {queueList.length === 0 ? (
-                        <div style={{
-                            height: '100%',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: '#94a3b8',
-                            padding: '16px 0'
-                        }}>
-                            <div style={{ fontSize: '26px', marginBottom: '6px', opacity: 0.6 }}>📭</div>
-                            <span style={{ fontSize: '13px', fontWeight: 700 }}>{t?.noMembersMatch || 'No members in queue'}</span>
-                        </div>
-                    ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            {queueList.map((item, idx) => {
-                                const displayName = getLocalizedText(item, 'name');
-                                const displayPosition = getLocalizedText(item, 'position');
-                                const displayTopic = getLocalizedText(item, 'topic');
-
-                                return (
-                                    <div
-                                        key={idx}
-                                        style={{
-                                            padding: '10px 12px',
-                                            borderRadius: '10px',
-                                            background: '#f8fafc',
-                                            border: '1px solid #e2e8f0',
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            alignItems: 'center',
-                                            gap: '8px'
-                                        }}
-                                    >
-                                        <div style={{ flex: 1, minWidth: 0 }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                <span style={{ fontWeight: 900, fontSize: '14px', color: '#0f172a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                                    #{toDevanagariDigits(idx + 1)} {displayName}
-                                                </span>
-                                                {formatRequestedTimeBadge(item) && (
-                                                    <span style={{
-                                                        background: '#ffffff',
-                                                        color: '#475569',
-                                                        border: '1px solid #cbd5e1',
-                                                        fontSize: '10px',
-                                                        fontWeight: 800,
-                                                        padding: '1px 5px',
-                                                        borderRadius: '4px',
-                                                        flexShrink: 0
-                                                    }}>
-                                                        ⏱️ {formatRequestedTimeBadge(item)}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '3px', flexWrap: 'nowrap', overflow: 'hidden' }}>
-                                                <span style={{ fontSize: '12px', color: '#64748b', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                                                    {displayPosition}
-                                                </span>
-                                                {displayTopic && (
-                                                    <span style={{
-                                                        background: '#eff6ff',
-                                                        color: '#2563eb',
-                                                        border: '1px solid #bfdbfe',
-                                                        borderRadius: '4px',
-                                                        padding: '1px 6px',
-                                                        fontSize: '11px',
-                                                        fontWeight: 800,
-                                                        whiteSpace: 'nowrap',
-                                                        overflow: 'hidden',
-                                                        textOverflow: 'ellipsis',
-                                                        maxWidth: '180px'
-                                                    }}>
-                                                        📌 {displayTopic}
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
-                                            <button
-                                                onClick={() => {
-                                                    socket.emit('allowQueuedSpeaker', { section: sectionKey, index: idx });
-                                                    setIsModalOpen(true);
-                                                }}
-                                                style={{
-                                                    background: '#16a34a',
-                                                    color: '#fff',
-                                                    border: 'none',
-                                                    borderRadius: '6px',
-                                                    padding: '6px 10px',
-                                                    fontSize: '11px',
-                                                    fontWeight: 800,
-                                                    cursor: 'pointer'
-                                                }}
-                                            >
-                                                ✓ {t?.allow || 'Allow'}
-                                            </button>
-                                            <button
-                                                onClick={() => socket.emit('denyQueuedSpeaker', { section: sectionKey, index: idx })}
-                                                style={{
-                                                    background: '#fee2e2',
-                                                    color: '#dc2626',
-                                                    border: 'none',
-                                                    borderRadius: '6px',
-                                                    padding: '6px 8px',
-                                                    fontSize: '11px',
-                                                    fontWeight: 800,
-                                                    cursor: 'pointer'
-                                                }}
-                                            >
-                                                ✕
-                                            </button>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    )}
-                </div>
-
-                {/* Column Action Button */}
-                <div style={{ padding: '8px 12px', background: '#f8fafc', borderTop: '1.5px solid #f1f5f9', flexShrink: 0 }}>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                     <button
-                        onClick={() => {
-                            socket.emit('switchSection', sectionKey);
-                            socket.emit('nextSpeaker', sectionKey);
-                            setIsModalOpen(true);
-                        }}
+                        onClick={() => setActiveTab('floor')}
                         style={{
-                            width: '100%',
-                            padding: '10px',
+                            background: activeTab === 'floor' ? '#0f172a' : '#ffffff',
+                            color: activeTab === 'floor' ? '#ffffff' : '#475569',
+                            border: activeTab === 'floor' ? 'none' : '1.5px solid #e2e8f0',
                             borderRadius: '8px',
-                            background: themeColor,
-                            color: '#ffffff',
-                            border: 'none',
+                            padding: '10px 18px',
                             fontWeight: 900,
                             fontSize: '13px',
                             cursor: 'pointer',
-                            boxShadow: `0 2px 8px ${themeColor}33`
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px'
                         }}
                     >
-                        {t?.nextSpeaker || 'Next Speaker'} ({title.split(' ')[0]})
+                        🏛️ {t?.tabFloorConsole || 'Floor Console'}
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('directory')}
+                        style={{
+                            background: activeTab === 'directory' ? '#0f172a' : '#ffffff',
+                            color: activeTab === 'directory' ? '#ffffff' : '#475569',
+                            border: activeTab === 'directory' ? 'none' : '1.5px solid #e2e8f0',
+                            borderRadius: '8px',
+                            padding: '10px 18px',
+                            fontWeight: 800,
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px'
+                        }}
+                    >
+                        📇 {t?.tabDirectory || 'Member Directory'}
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('records')}
+                        style={{
+                            background: activeTab === 'records' ? '#0f172a' : '#ffffff',
+                            color: activeTab === 'records' ? '#ffffff' : '#475569',
+                            border: activeTab === 'records' ? 'none' : '1.5px solid #e2e8f0',
+                            borderRadius: '8px',
+                            padding: '10px 18px',
+                            fontWeight: 800,
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px'
+                        }}
+                    >
+                        📊 {t?.speakerRecords || 'Speaker Records'}
                     </button>
                 </div>
-            </div>
-        );
-    };
-
-    const interruptionsList = Array.isArray(state.interruptions) ? state.interruptions : [];
-
-    return (
-        <div style={{
-            position: 'fixed',
-            inset: 0,
-            width: '100vw',
-            height: '100vh',
-            overflow: 'hidden',
-            background: '#f8fafc',
-            padding: '12px 20px',
-            color: '#0f172a',
-            display: 'flex',
-            flexDirection: 'column',
-            boxSizing: 'border-box'
-        }}>
-            {/* Header Toolbar */}
-            <div style={{
-                background: '#ffffff',
-                borderRadius: '14px',
-                padding: '10px 22px',
-                boxShadow: '0 2px 6px rgba(0,0,0,0.02)',
-                border: '1.5px solid #e2e8f0',
-                display: 'grid',
-                gridTemplateColumns: '1fr auto 1fr',
-                alignItems: 'center',
-                marginBottom: '10px',
-                flexShrink: 0
-            }}>
-                <div />
 
                 <div style={{ textAlign: 'center' }}>
-                    <h1 style={{ margin: 0, fontSize: '20px', fontWeight: 900, color: '#0f172a', letterSpacing: '-0.02em' }}>
-                        {t?.consoleTitle || 'Presiding Officer Control Console'}
-                    </h1>
-                    <p style={{ margin: '2px 0 0 0', fontSize: '13px', color: '#64748b', fontWeight: 600 }}>
-                        {t?.consoleSubtitle || 'Legislative Assembly Session Management'}
+                    <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900, color: '#0f172a' }}>
+                        {t?.presidingTitle || 'Presiding Officer Control Console'}
+                    </h2>
+                    <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
+                        {t?.presidingSubtitle || 'Legislative Assembly Session & Floor Management System'}
                     </p>
                 </div>
 
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', justifyContent: 'flex-end' }}>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <a
+                        href="/display"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{
+                            background: '#2563eb',
+                            color: '#ffffff',
+                            textDecoration: 'none',
+                            fontSize: '13px',
+                            fontWeight: 900,
+                            padding: '8px 14px',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px'
+                        }}
+                    >
+                        🖥️ {t?.openHallScreen || 'Display'} ↗
+                    </a>
                     <LanguageToggle />
                     <button
                         onClick={handleSignOut}
                         style={{
-                            background: '#ffffff',
-                            color: '#475569',
-                            border: '1.5px solid #cbd5e1',
-                            padding: '6px 14px',
+                            background: '#fee2e2',
+                            color: '#dc2626',
+                            border: 'none',
                             borderRadius: '8px',
-                            fontSize: '12px',
+                            padding: '8px 16px',
                             fontWeight: 800,
+                            fontSize: '13px',
                             cursor: 'pointer'
                         }}
                     >
@@ -506,399 +328,640 @@ export default function HeadConsole() {
                 </div>
             </div>
 
-            {/* Navigation Tabs Bar */}
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', flexShrink: 0 }}>
-                <button
-                    onClick={() => setActiveTab('floor')}
-                    style={{
-                        padding: '8px 18px',
-                        borderRadius: '8px',
-                        border: activeTab === 'floor' ? 'none' : '1.5px solid #e2e8f0',
-                        background: activeTab === 'floor' ? '#2563eb' : '#ffffff',
-                        color: activeTab === 'floor' ? '#ffffff' : '#64748b',
-                        fontWeight: 800,
-                        fontSize: '13px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        boxShadow: activeTab === 'floor' ? '0 4px 10px rgba(37,99,235,0.25)' : 'none'
-                    }}
-                >
-                    🏛️ {t?.tabConsole || 'Floor Console'}
-                </button>
-
-                <button
-                    onClick={() => setActiveTab('directory')}
-                    style={{
-                        padding: '8px 18px',
-                        borderRadius: '8px',
-                        border: activeTab === 'directory' ? 'none' : '1.5px solid #e2e8f0',
-                        background: activeTab === 'directory' ? '#2563eb' : '#ffffff',
-                        color: activeTab === 'directory' ? '#ffffff' : '#64748b',
-                        fontWeight: 800,
-                        fontSize: '13px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        boxShadow: activeTab === 'directory' ? '0 4px 10px rgba(37,99,235,0.25)' : 'none'
-                    }}
-                >
-                    📇 {t?.tabDirectory || 'Member Directory'}
-                </button>
-
-                <button
-                    onClick={() => { setActiveTab('records'); fetchSpeakerStats(); }}
-                    style={{
-                        padding: '8px 18px',
-                        borderRadius: '8px',
-                        border: activeTab === 'records' ? 'none' : '1.5px solid #e2e8f0',
-                        background: activeTab === 'records' ? '#2563eb' : '#ffffff',
-                        color: activeTab === 'records' ? '#ffffff' : '#64748b',
-                        fontWeight: 800,
-                        fontSize: '13px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        boxShadow: activeTab === 'records' ? '0 4px 10px rgba(37,99,235,0.25)' : 'none'
-                    }}
-                >
-                    📊 {t?.tabAnalytics || 'Speaker Records'}
-                </button>
-            </div>
-
-            {/* Main Single-Screen Workspace */}
+            {/* TAB 1: FLOOR CONSOLE */}
             {activeTab === 'floor' && (
-                <div style={{
-                    flex: 1,
-                    display: 'grid',
-                    gridTemplateRows: '165px 1fr',
-                    gap: '10px',
-                    minHeight: 0
-                }}>
-                    {/* Top Row */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '10px', minHeight: 0 }}>
-                        {/* Current Floor Speaker */}
-                        <div
-                            onClick={() => state.activeSpeaker && setIsModalOpen(true)}
-                            style={{
-                                background: state.activeSpeaker ? '#f0fdf4' : '#ffffff',
-                                borderRadius: '14px',
-                                border: state.activeSpeaker ? '2px solid #86efac' : '1.5px solid #e2e8f0',
-                                padding: '12px 18px',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                justifyContent: 'space-between',
-                                cursor: state.activeSpeaker ? 'pointer' : 'default',
-                                minHeight: 0
-                            }}
-                        >
+                <>
+                    {/* Active Interruption Alert Banner with Resume Original Speaker Button */}
+                    {isInterruption && (
+                        <div style={{
+                            background: '#fff5f5',
+                            border: '2px solid #f87171',
+                            borderRadius: '14px',
+                            padding: '14px 20px',
+                            marginBottom: '16px',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            boxShadow: '0 4px 12px rgba(220, 38, 38, 0.1)'
+                        }}>
                             <div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-                                    <span style={{ fontSize: '11px', fontWeight: 900, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                        {t?.currentSpeaker || 'Current Speaker'}
-                                    </span>
-                                    <span style={{
-                                        fontSize: '11px',
-                                        fontWeight: 900,
-                                        padding: '2px 8px',
-                                        borderRadius: '9999px',
-                                        background: state.activeSpeaker ? '#dcfce7' : '#f1f5f9',
-                                        color: state.activeSpeaker ? '#166534' : '#94a3b8'
-                                    }}>
-                                        {state.activeSpeaker ? '● ACTIVE ON FLOOR' : 'IDLE'}
-                                    </span>
+                                <div style={{ fontWeight: 900, color: '#dc2626', fontSize: '16px' }}>
+                                    🚨 नियमापत्ति वक्ता: {getLocalizedText(state.activeInterruption.speaker, 'name')}
                                 </div>
-
-                                {state.activeSpeaker ? (
-                                    <div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900, color: '#166534' }}>
-                                                {getLocalizedText(state.activeSpeaker, 'name')}
-                                            </h2>
-                                            {formatRequestedTimeBadge(state.activeSpeaker) && (
-                                                <span style={{ background: '#dbeafe', color: '#1e40af', fontSize: '11px', fontWeight: 800, padding: '2px 6px', borderRadius: '4px' }}>
-                                                    ⏱️ {formatRequestedTimeBadge(state.activeSpeaker)}
-                                                </span>
-                                            )}
-                                        </div>
-                                        <p style={{ margin: '2px 0', fontSize: '13px', color: '#475569', fontWeight: 600 }}>
-                                            {getLocalizedText(state.activeSpeaker, 'position')}
-                                        </p>
-                                        {getLocalizedText(state.activeSpeaker, 'topic') && (
-                                            <div style={{ fontSize: '12px', background: '#ffffff', padding: '3px 8px', borderRadius: '6px', color: '#0f172a', border: '1px solid #bbf7d0', display: 'inline-block', fontWeight: 700 }}>
-                                                📌 <strong>{t?.topic || 'Topic'}:</strong> {getLocalizedText(state.activeSpeaker, 'topic')}
-                                            </div>
-                                        )}
-
-                                        <div style={{
-                                            fontSize: '32px',
-                                            fontWeight: 900,
-                                            fontFamily: 'monospace',
-                                            color: remainingSecs <= 60 ? '#b91c1c' : '#166534',
-                                            margin: '2px 0 0 0',
-                                            lineHeight: 1
-                                        }}>
-                                            {remainingSecs <= 0 && state.floorTimer?.endsAt ? (t?.expired || 'EXPIRED') : formatClock(remainingSecs)}
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div style={{ textAlign: 'center', padding: '6px 0' }}>
-                                        <div style={{ fontSize: '13px', color: '#94a3b8', fontWeight: 700 }}>{t?.noSpeaker || 'No speaker currently'}</div>
-                                        <div style={{ fontSize: '32px', fontWeight: 900, fontFamily: 'monospace', color: '#e2e8f0', marginTop: '2px', lineHeight: 1 }}>
-                                            00:00
-                                        </div>
+                                {state.savedFloorSpeaker?.speaker && (
+                                    <div style={{ fontSize: '13px', color: '#7f1d1d', marginTop: '2px', fontWeight: 700 }}>
+                                        ⏸️ रोकिएका मूल वक्ता: {getLocalizedText(state.savedFloorSpeaker.speaker, 'name')} (बाँकी समय: {formatClock(state.savedFloorSpeaker.remainingSeconds)})
                                     </div>
                                 )}
                             </div>
 
-                            <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }} onClick={(e) => e.stopPropagation()}>
-                                <button
-                                    onClick={() => {
-                                        socket.emit('nextSpeaker', state.activeSection);
-                                        setIsModalOpen(true);
-                                    }}
-                                    style={{
-                                        flex: 1,
-                                        background: '#16a34a',
-                                        color: '#ffffff',
-                                        border: 'none',
-                                        borderRadius: '8px',
-                                        padding: '8px',
-                                        fontWeight: 900,
-                                        fontSize: '13px',
-                                        cursor: 'pointer'
-                                    }}
-                                >
-                                    {t?.nextSpeaker || 'Next Speaker'}
-                                </button>
-                                <button
-                                    onClick={handleManualClear}
-                                    style={{
-                                        background: '#ffffff',
-                                        color: '#475569',
-                                        border: '1.5px solid #cbd5e1',
-                                        borderRadius: '8px',
-                                        padding: '8px 14px',
-                                        fontWeight: 800,
-                                        fontSize: '13px',
-                                        cursor: 'pointer'
-                                    }}
-                                >
-                                    {t?.clear || 'Clear'}
-                                </button>
-                            </div>
+                            <button
+                                onClick={() => socket.emit('finishInterruption')}
+                                style={{
+                                    background: '#dc2626',
+                                    color: '#ffffff',
+                                    border: 'none',
+                                    borderRadius: '8px',
+                                    padding: '10px 18px',
+                                    fontWeight: 900,
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    boxShadow: '0 2px 8px rgba(220, 38, 38, 0.3)'
+                                }}
+                            >
+                                🛑 नियमापत्ति समाप्त गर्नुहोस् (Resume)
+                            </button>
                         </div>
+                    )}
 
-                        {/* Priority Interruptions */}
+                    {/* Active Floor Speaker & Interruptions Requested 2-Card Row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '20px', marginBottom: '20px' }}>
+                        {/* Left: Active Floor Speaker */}
                         <div style={{
-                            background: interruptionsList.length > 0 ? '#fff5f5' : '#ffffff',
-                            borderRadius: '14px',
-                            border: interruptionsList.length > 0 ? '2px solid #fca5a5' : '1.5px solid #e2e8f0',
-                            padding: '12px 18px',
+                            background: '#ffffff',
+                            border: '1.5px solid #e2e8f0',
+                            borderRadius: '16px',
+                            padding: '20px 24px',
+                            minHeight: '140px',
                             display: 'flex',
                             flexDirection: 'column',
                             justifyContent: 'space-between',
-                            minHeight: 0
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
                         }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                                <span style={{ fontSize: '11px', fontWeight: 900, color: '#dc2626', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                                    {t?.interruptionsTitle || 'Interruptions Requested'}
+                            <div>
+                                <span style={{ background: '#f1f5f9', color: '#475569', fontSize: '11px', fontWeight: 800, padding: '3px 10px', borderRadius: '9999px' }}>
+                                    {activeSpk ? (isInterruption ? '🚨 INTERRUPTION ACTIVE' : 'ACTIVE FLOOR SPEAKER') : (t?.noSpeaker || 'No speaker currently')}
                                 </span>
-                                <span style={{
-                                    fontSize: '11px',
-                                    fontWeight: 900,
-                                    padding: '2px 8px',
-                                    borderRadius: '9999px',
-                                    background: interruptionsList.length > 0 ? '#fee2e2' : '#f1f5f9',
-                                    color: interruptionsList.length > 0 ? '#b91c1c' : '#94a3b8'
-                                }}>
-                                    {t?.badgePointOfOrder || 'Point of Order'} ({toDevanagariDigits(interruptionsList.length)})
+
+                                {activeSpk ? (
+                                    <div style={{ marginTop: '12px' }}>
+                                        <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 900, color: '#0f172a' }}>
+                                            {getLocalizedText(activeSpk, 'name')}
+                                        </h2>
+                                        <div style={{ fontSize: '14px', color: '#64748b', marginTop: '2px', fontWeight: 700 }}>
+                                            {getLocalizedText(activeSpk, 'position')} • {toDevanagariDigits(activeSpk.uniqueId || activeSpk.unique_id || '')}
+                                        </div>
+                                        {getLocalizedText(activeSpk, 'topic') && (
+                                            <div style={{ marginTop: '6px', fontSize: '13px', color: '#0284c7', fontWeight: 800 }}>
+                                                📌 विषय: {getLocalizedText(activeSpk, 'topic')}
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div style={{ margin: 'auto 0', color: '#94a3b8', fontWeight: 700, fontSize: '16px', paddingTop: '16px' }}>
+                                        {t?.noSpeaker || 'No speaker currently'}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Right: Priority Interruptions Requested */}
+                        <div style={{
+                            background: '#ffffff',
+                            border: '1.5px solid #e2e8f0',
+                            borderRadius: '16px',
+                            padding: '20px 24px',
+                            minHeight: '140px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'space-between',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
+                        }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                <span style={{ fontSize: '14px', fontWeight: 900, color: '#dc2626', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    🚨 {t?.interruptionsTitle || 'Interruptions Requested'}
+                                </span>
+                                <span style={{ background: '#fee2e2', color: '#b91c1c', fontSize: '12px', fontWeight: 900, padding: '2px 8px', borderRadius: '9999px' }}>
+                                    {toDevanagariDigits(state.interruptions?.length || 0)}
                                 </span>
                             </div>
 
-                            <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-                                {interruptionsList.length === 0 ? (
-                                    <div style={{ textAlign: 'center', padding: '20px 0', color: '#94a3b8', fontSize: '13px', fontWeight: 700 }}>
-                                        No active point of order requests
+                            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                                {(!state.interruptions || state.interruptions.length === 0) ? (
+                                    <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: '13px', fontWeight: 600 }}>
+                                        No pending interruption requests
                                     </div>
                                 ) : (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                        {interruptionsList.map((item, idx) => (
-                                            <div
-                                                key={idx}
-                                                style={{
-                                                    background: '#ffffff',
-                                                    border: '1px solid #fecaca',
-                                                    borderRadius: '8px',
-                                                    padding: '6px 10px',
-                                                    display: 'flex',
-                                                    justifyContent: 'space-between',
-                                                    alignItems: 'center'
-                                                }}
-                                            >
-                                                <div>
-                                                    <strong style={{ color: '#b91c1c', fontSize: '13px', fontWeight: 800 }}>{getLocalizedText(item, 'name')}</strong>
-                                                    <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 600 }}>{item.reason}</div>
-                                                </div>
-                                                <div style={{ display: 'flex', gap: '4px' }}>
-                                                    <button
-                                                        onClick={() => socket.emit('allowInterruption', idx)}
-                                                        style={{
-                                                            background: '#16a34a',
-                                                            color: '#fff',
-                                                            border: 'none',
-                                                            borderRadius: '6px',
-                                                            padding: '5px 10px',
-                                                            fontSize: '11px',
-                                                            fontWeight: 800,
-                                                            cursor: 'pointer'
-                                                        }}
-                                                    >
-                                                        {t?.allow || 'Allow'}
-                                                    </button>
-                                                    <button
-                                                        onClick={() => socket.emit('dismissInterruption', idx)}
-                                                        style={{
-                                                            background: '#fee2e2',
-                                                            color: '#dc2626',
-                                                            border: 'none',
-                                                            borderRadius: '6px',
-                                                            padding: '5px 8px',
-                                                            fontSize: '11px',
-                                                            fontWeight: 800,
-                                                            cursor: 'pointer'
-                                                        }}
-                                                    >
-                                                        {t?.dismiss || 'Dismiss'}
-                                                    </button>
-                                                </div>
+                                    state.interruptions.map((item, idx) => (
+                                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#fff5f5', border: '1px solid #fecaca', borderRadius: '8px', padding: '8px 12px', marginBottom: '6px' }}>
+                                            <div>
+                                                <div style={{ fontWeight: 900, color: '#991b1b', fontSize: '14px' }}>{getLocalizedText(item, 'name')}</div>
+                                                <div style={{ fontSize: '11px', color: '#b91c1c' }}>{item.reason}</div>
                                             </div>
-                                        ))}
-                                    </div>
+                                            <div style={{ display: 'flex', gap: '4px' }}>
+                                                <button onClick={() => handleAllowInterruption(idx)} style={{ background: '#16a34a', color: '#fff', border: 'none', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', fontWeight: 900, cursor: 'pointer' }}>🎤 Allow</button>
+                                                <button onClick={() => handleDismissInterruption(idx)} style={{ background: '#fee2e2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', padding: '4px 8px', fontSize: '11px', fontWeight: 800, cursor: 'pointer' }}>✕</button>
+                                            </div>
+                                        </div>
+                                    ))
                                 )}
                             </div>
                         </div>
                     </div>
 
-                    {/* Bottom Row */}
+                    {/* Middle Timer & Direct Adjust Bar */}
                     <div style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(3, 1fr)',
-                        gap: '10px',
-                        minHeight: 0
+                        background: '#ffffff',
+                        border: '1.5px solid #e2e8f0',
+                        borderRadius: '16px',
+                        padding: '16px 24px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '20px',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
                     }}>
-                        {renderQueueColumn('sunya', `⏳ ${t?.sunyaSamaya || 'Sunya Samaya'}`, '#2563eb', '#eff6ff')}
-                        {renderQueueColumn('aakasmik', `🚨 ${t?.aakasmikSamaya || 'Aakasmik Samaya'}`, '#dc2626', '#fef2f2')}
-                        {renderQueueColumn('bishesh', `🌟 ${t?.bisheshSamaya || 'Bishesh Samaya'}`, '#7c3aed', '#f5f3ff')}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                            <div style={{
+                                fontSize: '44px',
+                                fontWeight: 900,
+                                fontFamily: 'monospace',
+                                color: remainingSecs <= 30 && remainingSecs > 0 ? '#dc2626' : (remainingSecs <= 60 && remainingSecs > 30 ? '#d97706' : '#0f172a'),
+                                lineHeight: 1
+                            }}>
+                                {formatClock(remainingSecs)}
+                            </div>
+
+                            <button
+                                onClick={handlePauseResume}
+                                style={{
+                                    background: '#16a34a',
+                                    color: '#ffffff',
+                                    border: 'none',
+                                    borderRadius: '8px',
+                                    padding: '10px 16px',
+                                    fontWeight: 900,
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                }}
+                            >
+                                {state.floorTimer.isPaused ? '▶ Resume' : '⏸ Pause'}
+                            </button>
+
+                            <button
+                                onClick={handleResetTimer}
+                                style={{
+                                    background: '#fee2e2',
+                                    color: '#dc2626',
+                                    border: 'none',
+                                    borderRadius: '8px',
+                                    padding: '10px 16px',
+                                    fontWeight: 900,
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                }}
+                            >
+                                🔄 Reset
+                            </button>
+                        </div>
+
+                        {/* Preset Time Buttons & Custom M / S Input */}
+                        <form onSubmit={handleCustomTimeSubmit} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <button type="button" onClick={() => handleSetTime(1)} style={{ background: '#f8fafc', border: '1.5px solid #cbd5e1', borderRadius: '8px', padding: '10px 14px', fontWeight: 800, fontSize: '13px', cursor: 'pointer', color: '#0f172a' }}>
+                                ⏱️ {toDevanagariDigits(1)} {t?.minutesLabel || 'Minutes'}
+                            </button>
+                            <button type="button" onClick={() => handleSetTime(3)} style={{ background: '#f8fafc', border: '1.5px solid #cbd5e1', borderRadius: '8px', padding: '10px 14px', fontWeight: 800, fontSize: '13px', cursor: 'pointer', color: '#0f172a' }}>
+                                ⏱️ {toDevanagariDigits(3)} {t?.minutesLabel || 'Minutes'}
+                            </button>
+                            <button type="button" onClick={() => handleSetTime(5)} style={{ background: '#f8fafc', border: '1.5px solid #cbd5e1', borderRadius: '8px', padding: '10px 14px', fontWeight: 800, fontSize: '13px', cursor: 'pointer', color: '#0f172a' }}>
+                                ⏱️ {toDevanagariDigits(5)} {t?.minutesLabel || 'Minutes'}
+                            </button>
+
+                            <input
+                                type="number"
+                                min="0"
+                                placeholder="M"
+                                value={customMins}
+                                onChange={(e) => setCustomMins(e.target.value)}
+                                style={{ width: '46px', padding: '9px', textAlign: 'center', border: '1.5px solid #cbd5e1', borderRadius: '8px', fontWeight: 800, fontSize: '13px' }}
+                            />
+                            <input
+                                type="number"
+                                min="0"
+                                max="59"
+                                placeholder="S"
+                                value={customSecs}
+                                onChange={(e) => setCustomSecs(e.target.value)}
+                                style={{ width: '46px', padding: '9px', textAlign: 'center', border: '1.5px solid #cbd5e1', borderRadius: '8px', fontWeight: 800, fontSize: '13px' }}
+                            />
+                            <button
+                                type="submit"
+                                style={{
+                                    background: '#0284c7',
+                                    color: '#ffffff',
+                                    border: 'none',
+                                    borderRadius: '8px',
+                                    padding: '10px 16px',
+                                    fontWeight: 900,
+                                    fontSize: '13px',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                Set
+                            </button>
+                        </form>
                     </div>
-                </div>
+
+                    {/* THREE EXTENDED SESSION QUEUE COLUMNS */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
+                        {/* 1. सुन्ने समय (Sunne Samaya) */}
+                        <div style={{
+                            background: '#fffdf5',
+                            border: '2.5px solid #f59e0b',
+                            borderRadius: '20px',
+                            height: '480px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'space-between',
+                            padding: '18px',
+                            boxSizing: 'border-box'
+                        }}>
+                            <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                    <span style={{ fontSize: '16px', fontWeight: 900, color: '#d97706', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        ⏳ {t?.sunyaSamaya || 'Sunne Samaya (Listening Time)'}
+                                    </span>
+                                    <span style={{ background: '#fef3c7', color: '#b45309', border: '1px solid #fde68a', fontSize: '12px', fontWeight: 900, padding: '2px 10px', borderRadius: '9999px' }}>
+                                        {toDevanagariDigits(state.queues?.sunya?.length || 0)}
+                                    </span>
+                                </div>
+
+                                <input
+                                    type="text"
+                                    value={searchSunya}
+                                    onChange={(e) => setSearchSunya(e.target.value)}
+                                    placeholder="🔍 खोज्नुहोस् (नाम वा ID)..."
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        borderRadius: '8px',
+                                        border: '1.5px solid #fde68a',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        background: '#ffffff',
+                                        boxSizing: 'border-box',
+                                        marginBottom: '12px'
+                                    }}
+                                />
+                            </div>
+
+                            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
+                                {qSunya.length === 0 ? (
+                                    <div style={{ margin: 'auto', textAlign: 'center', color: '#b45309', opacity: 0.6, fontSize: '13px', fontWeight: 700 }}>
+                                        <div style={{ fontSize: '32px', marginBottom: '4px' }}>📬</div>
+                                        {searchSunya ? 'कुनै सदस्य भेटिएन' : 'कुनै सदस्य पालोमा छैनन्'}
+                                    </div>
+                                ) : (
+                                    qSunya.map((item, idx) => {
+                                        const realIdx = state.queues.sunya.findIndex(s => (s.uniqueId || s.unique_id) === (item.uniqueId || item.unique_id));
+                                        return (
+                                            <div key={idx} style={{ background: '#ffffff', border: '1.5px solid #fde68a', borderRadius: '12px', padding: '10px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <div style={{ minWidth: 0, flex: 1 }}>
+                                                    <div style={{ fontWeight: 900, color: '#0f172a', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                        #{toDevanagariDigits(idx + 1)} {getLocalizedText(item, 'name')}
+                                                    </div>
+                                                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '1px' }}>
+                                                        {toDevanagariDigits(item.uniqueId || item.unique_id)} • ⏱️ {toDevanagariDigits(item.requestedMinutes || 3)}m
+                                                    </div>
+                                                    {getLocalizedText(item, 'topic') && (
+                                                        <div style={{ fontSize: '11px', color: '#d97706', fontWeight: 700, marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                            📌 {getLocalizedText(item, 'topic')}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+                                                    <button onClick={() => handleAllowQueued('sunya', realIdx !== -1 ? realIdx : idx)} style={{ background: '#16a34a', color: '#fff', border: 'none', borderRadius: '6px', padding: '5px 10px', fontSize: '11px', fontWeight: 900, cursor: 'pointer' }}>🎤</button>
+                                                    <button onClick={() => handleDenyQueued('sunya', realIdx !== -1 ? realIdx : idx)} style={{ background: '#fee2e2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', padding: '5px 8px', fontSize: '11px', fontWeight: 800, cursor: 'pointer' }}>✕</button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })
+                                )}
+                            </div>
+
+                            <button
+                                onClick={() => handleNextSpeaker('sunya')}
+                                style={{
+                                    marginTop: '12px',
+                                    width: '100%',
+                                    padding: '12px',
+                                    background: '#d97706',
+                                    color: '#ffffff',
+                                    border: 'none',
+                                    borderRadius: '10px',
+                                    fontWeight: 900,
+                                    fontSize: '14px',
+                                    cursor: 'pointer',
+                                    boxShadow: '0 2px 8px rgba(217, 119, 6, 0.3)'
+                                }}
+                            >
+                                अर्को वक्ता ( ⏳ )
+                            </button>
+                        </div>
+
+                        {/* 2. आकस्मिक समय (Aakasmik Samaya) */}
+                        <div style={{
+                            background: '#fff8f8',
+                            border: '2.5px solid #ef4444',
+                            borderRadius: '20px',
+                            height: '480px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'space-between',
+                            padding: '18px',
+                            boxSizing: 'border-box'
+                        }}>
+                            <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                    <span style={{ fontSize: '16px', fontWeight: 900, color: '#dc2626', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        🚨 {t?.aakasmikSamaya || 'Aakasmik Samaya (Urgent Hour)'}
+                                    </span>
+                                    <span style={{ background: '#fee2e2', color: '#b91c1c', border: '1px solid #fca5a5', fontSize: '12px', fontWeight: 900, padding: '2px 10px', borderRadius: '9999px' }}>
+                                        {toDevanagariDigits(state.queues?.aakasmik?.length || 0)}
+                                    </span>
+                                </div>
+
+                                <input
+                                    type="text"
+                                    value={searchAakasmik}
+                                    onChange={(e) => setSearchAakasmik(e.target.value)}
+                                    placeholder="🔍 खोज्नुहोस् (नाम वा ID)..."
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        borderRadius: '8px',
+                                        border: '1.5px solid #fca5a5',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        background: '#ffffff',
+                                        boxSizing: 'border-box',
+                                        marginBottom: '12px'
+                                    }}
+                                />
+                            </div>
+
+                            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
+                                {qAakasmik.length === 0 ? (
+                                    <div style={{ margin: 'auto', textAlign: 'center', color: '#b91c1c', opacity: 0.6, fontSize: '13px', fontWeight: 700 }}>
+                                        <div style={{ fontSize: '32px', marginBottom: '4px' }}>📬</div>
+                                        {searchAakasmik ? 'कुनै सदस्य भेटिएन' : 'कुनै सदस्य पालोमा छैनन्'}
+                                    </div>
+                                ) : (
+                                    qAakasmik.map((item, idx) => {
+                                        const realIdx = state.queues.aakasmik.findIndex(s => (s.uniqueId || s.unique_id) === (item.uniqueId || item.unique_id));
+                                        return (
+                                            <div key={idx} style={{ background: '#ffffff', border: '1.5px solid #fecaca', borderRadius: '12px', padding: '10px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <div style={{ minWidth: 0, flex: 1 }}>
+                                                    <div style={{ fontWeight: 900, color: '#0f172a', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                        #{toDevanagariDigits(idx + 1)} {getLocalizedText(item, 'name')}
+                                                    </div>
+                                                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '1px' }}>
+                                                        {toDevanagariDigits(item.uniqueId || item.unique_id)} • ⏱️ {toDevanagariDigits(item.requestedMinutes || 3)}m
+                                                    </div>
+                                                    {getLocalizedText(item, 'topic') && (
+                                                        <div style={{ fontSize: '11px', color: '#dc2626', fontWeight: 700, marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                            📌 {getLocalizedText(item, 'topic')}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+                                                    <button onClick={() => handleAllowQueued('aakasmik', realIdx !== -1 ? realIdx : idx)} style={{ background: '#16a34a', color: '#fff', border: 'none', borderRadius: '6px', padding: '5px 10px', fontSize: '11px', fontWeight: 900, cursor: 'pointer' }}>🎤</button>
+                                                    <button onClick={() => handleDenyQueued('aakasmik', realIdx !== -1 ? realIdx : idx)} style={{ background: '#fee2e2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', padding: '5px 8px', fontSize: '11px', fontWeight: 800, cursor: 'pointer' }}>✕</button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })
+                                )}
+                            </div>
+
+                            <button
+                                onClick={() => handleNextSpeaker('aakasmik')}
+                                style={{
+                                    marginTop: '12px',
+                                    width: '100%',
+                                    padding: '12px',
+                                    background: '#dc2626',
+                                    color: '#ffffff',
+                                    border: 'none',
+                                    borderRadius: '10px',
+                                    fontWeight: 900,
+                                    fontSize: '14px',
+                                    cursor: 'pointer',
+                                    boxShadow: '0 2px 8px rgba(220, 38, 38, 0.3)'
+                                }}
+                            >
+                                अर्को वक्ता ( 🚨 )
+                            </button>
+                        </div>
+
+                        {/* 3. विशेष समय (Bishesh Samaya) */}
+                        <div style={{
+                            background: '#f6fdf9',
+                            border: '2.5px solid #10b981',
+                            borderRadius: '20px',
+                            height: '480px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'space-between',
+                            padding: '18px',
+                            boxSizing: 'border-box'
+                        }}>
+                            <div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                    <span style={{ fontSize: '16px', fontWeight: 900, color: '#059669', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        🌟 {t?.bisheshSamaya || 'Bishesh Samaya (Special Hour)'}
+                                    </span>
+                                    <span style={{ background: '#d1fae5', color: '#065f46', border: '1px solid #a7f3d0', fontSize: '12px', fontWeight: 900, padding: '2px 10px', borderRadius: '9999px' }}>
+                                        {toDevanagariDigits(state.queues?.bishesh?.length || 0)}
+                                    </span>
+                                </div>
+
+                                <input
+                                    type="text"
+                                    value={searchBishesh}
+                                    onChange={(e) => setSearchBishesh(e.target.value)}
+                                    placeholder="🔍 खोज्नुहोस् (नाम वा ID)..."
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        borderRadius: '8px',
+                                        border: '1.5px solid #a7f3d0',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        background: '#ffffff',
+                                        boxSizing: 'border-box',
+                                        marginBottom: '12px'
+                                    }}
+                                />
+                            </div>
+
+                            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', minHeight: 0 }}>
+                                {qBishesh.length === 0 ? (
+                                    <div style={{ margin: 'auto', textAlign: 'center', color: '#059669', opacity: 0.6, fontSize: '13px', fontWeight: 700 }}>
+                                        <div style={{ fontSize: '32px', marginBottom: '4px' }}>📬</div>
+                                        {searchBishesh ? 'कुनै सदस्य भेटिएन' : 'कुनै सदस्य पालोमा छैनन्'}
+                                    </div>
+                                ) : (
+                                    qBishesh.map((item, idx) => {
+                                        const realIdx = state.queues.bishesh.findIndex(s => (s.uniqueId || s.unique_id) === (item.uniqueId || item.unique_id));
+                                        return (
+                                            <div key={idx} style={{ background: '#ffffff', border: '1.5px solid #a7f3d0', borderRadius: '12px', padding: '10px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                <div style={{ minWidth: 0, flex: 1 }}>
+                                                    <div style={{ fontWeight: 900, color: '#0f172a', fontSize: '14px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                        #{toDevanagariDigits(idx + 1)} {getLocalizedText(item, 'name')}
+                                                    </div>
+                                                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '1px' }}>
+                                                        {toDevanagariDigits(item.uniqueId || item.unique_id)} • ⏱️ {toDevanagariDigits(item.requestedMinutes || 3)}m
+                                                    </div>
+                                                    {getLocalizedText(item, 'topic') && (
+                                                        <div style={{ fontSize: '11px', color: '#059669', fontWeight: 700, marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                            📌 {getLocalizedText(item, 'topic')}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+                                                    <button onClick={() => handleAllowQueued('bishesh', realIdx !== -1 ? realIdx : idx)} style={{ background: '#16a34a', color: '#fff', border: 'none', borderRadius: '6px', padding: '5px 10px', fontSize: '11px', fontWeight: 900, cursor: 'pointer' }}>🎤</button>
+                                                    <button onClick={() => handleDenyQueued('bishesh', realIdx !== -1 ? realIdx : idx)} style={{ background: '#fee2e2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', padding: '5px 8px', fontSize: '11px', fontWeight: 800, cursor: 'pointer' }}>✕</button>
+                                                </div>
+                                            </div>
+                                        );
+                                    })
+                                )}
+                            </div>
+
+                            <button
+                                onClick={() => handleNextSpeaker('bishesh')}
+                                style={{
+                                    marginTop: '12px',
+                                    width: '100%',
+                                    padding: '12px',
+                                    background: '#059669',
+                                    color: '#ffffff',
+                                    border: 'none',
+                                    borderRadius: '10px',
+                                    fontWeight: 900,
+                                    fontSize: '14px',
+                                    cursor: 'pointer',
+                                    boxShadow: '0 2px 8px rgba(5, 150, 105, 0.3)'
+                                }}
+                            >
+                                अर्को वक्ता ( 🌟 )
+                            </button>
+                        </div>
+                    </div>
+                </>
             )}
 
-            {/* TAB 2: DIRECTORY */}
+            {/* TAB 2: MEMBER DIRECTORY */}
             {activeTab === 'directory' && (
-                <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-                    <MemberDirectoryTab />
-                </div>
+                <MemberDirectoryTab />
             )}
 
-            {/* TAB 3: SPEAKER RECORDS */}
+            {/* TAB 3: SPEAKER RECORDS & ANALYTICS */}
             {activeTab === 'records' && (
-                <div style={{
-                    flex: 1,
-                    background: '#ffffff',
-                    borderRadius: '16px',
-                    padding: '16px',
-                    border: '1.5px solid #e2e8f0',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    minHeight: 0
-                }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexShrink: 0 }}>
+                <div style={{ background: '#ffffff', borderRadius: '16px', border: '1.5px solid #e2e8f0', padding: '24px', boxShadow: '0 4px 14px rgba(0,0,0,0.02)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
                         <div>
-                            <h3 style={{ margin: 0, fontSize: '17px', fontWeight: 900 }}>📊 {t?.speakingAnalytics || 'Speaker Records'}</h3>
-                            <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: '#64748b', fontWeight: 600 }}>Complete historical logs</p>
+                            <h2 style={{ margin: 0, fontSize: '20px', fontWeight: 900, color: '#0f172a' }}>
+                                📊 {t?.speakerRecords || 'Parliamentary Speaker Logs & Time Records'}
+                            </h2>
+                            <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#64748b', fontWeight: 600 }}>
+                                Live database logs of completed speeches, total consumed floor time, and session timestamps.
+                            </p>
                         </div>
                         <button
                             onClick={fetchSpeakerStats}
-                            style={{ padding: '6px 14px', borderRadius: '6px', border: '1.5px solid #cbd5e1', background: '#ffffff', fontWeight: 800, fontSize: '12px', cursor: 'pointer' }}
+                            style={{
+                                padding: '8px 16px',
+                                background: '#f8fafc',
+                                border: '1.5px solid #cbd5e1',
+                                borderRadius: '8px',
+                                fontWeight: 800,
+                                fontSize: '13px',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                            }}
                         >
-                            🔄 {t?.refreshRecords || 'Refresh Records'}
+                            🔄 Refresh Logs
                         </button>
                     </div>
 
-                    <div style={{ flex: 1, overflowY: 'auto', border: '1px solid #f1f5f9', borderRadius: '8px' }}>
+                    <div style={{ marginBottom: '16px' }}>
+                        <input
+                            type="text"
+                            value={searchStats}
+                            onChange={(e) => setSearchStats(e.target.value)}
+                            placeholder="🔍 Filter records by speaker name or position..."
+                            style={{
+                                width: '100%',
+                                padding: '12px 16px',
+                                borderRadius: '10px',
+                                border: '1.5px solid #cbd5e1',
+                                fontSize: '14px',
+                                fontWeight: 600,
+                                boxSizing: 'border-box'
+                            }}
+                        />
+                    </div>
+
+                    <div style={{ overflowX: 'auto', border: '1.5px solid #e2e8f0', borderRadius: '12px' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
                             <thead>
-                                <tr style={{ background: '#f8fafc', borderBottom: '1.5px solid #e2e8f0', color: '#64748b' }}>
-                                    <th style={{ padding: '10px 14px' }}>#</th>
-                                    <th style={{ padding: '10px 14px' }}>{t?.memberName || 'Member Name'}</th>
-                                    <th style={{ padding: '10px 14px' }}>{t?.designation || 'Designation'}</th>
-                                    <th style={{ padding: '10px 14px' }}>{t?.totalSpokenTime || 'Total Spoken Time'}</th>
-                                    <th style={{ padding: '10px 14px' }}>{t?.turnsTaken || 'Turns Taken'}</th>
-                                    <th style={{ padding: '10px 14px' }}>📅 {t?.spokenDate || "Date Spoken (B.S.)"}</th>
+                                <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', color: '#64748b' }}>
+                                    <th style={{ padding: '12px 14px' }}>#</th>
+                                    <th style={{ padding: '12px 14px' }}>Member Name</th>
+                                    <th style={{ padding: '12px 14px' }}>Position</th>
+                                    <th style={{ padding: '12px 14px' }}>Total Speaking Time</th>
+                                    <th style={{ padding: '12px 14px' }}>Session Turns</th>
+                                    <th style={{ padding: '12px 14px' }}>Last Floor Access</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {speakerStats.map((row, idx) => (
-                                    <tr key={idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                                        <td style={{ padding: '10px 14px', color: '#94a3b8', fontWeight: 800 }}>{toDevanagariDigits(idx + 1)}</td>
-                                        <td style={{ padding: '10px 14px', fontWeight: 900, color: '#2563eb' }}>
-                                            {getLocalizedText(row, 'name')}
-                                        </td>
-                                        <td style={{ padding: '10px 14px', color: '#64748b', fontWeight: 600 }}>
-                                            {getLocalizedText(row, 'position')}
-                                        </td>
-                                        <td style={{ padding: '10px 14px', fontWeight: 900, color: '#16a34a' }}>
-                                            {formatDurationReadable(row.total_seconds)}
-                                        </td>
-                                        <td style={{ padding: '10px 14px', fontWeight: 800 }}>{toDevanagariDigits(row.session_count)}</td>
-                                        <td style={{ padding: '10px 14px', color: '#0f172a', fontWeight: 900 }}>
-                                            {convertToNumericBSDate(row.session_date || row.last_spoken_at)}
-                                        </td>
+                                {statsLoading ? (
+                                    <tr>
+                                        <td colSpan="6" style={{ padding: '24px', textAlign: 'center', color: '#94a3b8' }}>Loading speaker records...</td>
                                     </tr>
-                                ))}
+                                ) : filteredStats.length === 0 ? (
+                                    <tr>
+                                        <td colSpan="6" style={{ padding: '24px', textAlign: 'center', color: '#94a3b8' }}>No recorded speaking history found for today's session.</td>
+                                    </tr>
+                                ) : (
+                                    filteredStats.map((row, idx) => (
+                                        <tr key={idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                                            <td style={{ padding: '12px 14px', color: '#94a3b8', fontWeight: 800 }}>
+                                                {toDevanagariDigits(idx + 1)}
+                                            </td>
+                                            <td style={{ padding: '12px 14px', fontWeight: 900, color: '#0f172a' }}>
+                                                {row.name}
+                                            </td>
+                                            <td style={{ padding: '12px 14px', color: '#475569', fontWeight: 600 }}>
+                                                {row.position || 'Member of Parliament'}
+                                            </td>
+                                            <td style={{ padding: '12px 14px', fontWeight: 900, color: '#16a34a' }}>
+                                                ⏱️ {formatDuration(row.total_seconds)}
+                                            </td>
+                                            <td style={{ padding: '12px 14px', fontWeight: 800, color: '#0284c7' }}>
+                                                {toDevanagariDigits(row.session_count || 1)} turns
+                                            </td>
+                                            <td style={{ padding: '12px 14px', color: '#64748b', fontSize: '12px', fontWeight: 600 }}>
+                                                {row.last_spoken_at || '--'}
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
                             </tbody>
                         </table>
                     </div>
                 </div>
             )}
-
-            <TimerModal 
-                isOpen={isModalOpen && !state.activeInterruption}
-                onClose={() => {
-                    if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
-                    setIsModalOpen(false);
-                }}
-                activeSpeaker={displaySpeaker}
-                remainingSecs={remainingSecs}
-                isPaused={Boolean(state.floorTimer?.isPaused)}
-                queue={state.queues?.[state.activeSection] || []}
-                interruptions={state.interruptions || []}
-                onPauseToggle={() => state.floorTimer?.isPaused ? socket.emit('resumeTimer') : socket.emit('pauseTimer')}
-                onReset={handleManualClear}
-                onNextSpeaker={() => socket.emit('nextSpeaker', state.activeSection)}
-                onAllowInterruption={(idx) => socket.emit('allowInterruption', idx)}
-                onDismissInterruption={(idx) => socket.emit('dismissInterruption', idx)}
-                onSetTime={(payload) => {
-                    if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
-                    isExpiringRef.current = false;
-                    socket.emit('setSpeakingTime', payload);
-                }}
-            />
-
-            <InterruptionModal
-                isOpen={Boolean(state.activeInterruption)}
-                activeInterruption={state.activeInterruption}
-                savedFloorSpeaker={state.savedFloorSpeaker}
-                remainingSecs={remainingSecs}
-                isPaused={Boolean(state.floorTimer?.isPaused)}
-                onFinishInterruption={() => socket.emit('finishInterruption')}
-                onPauseToggle={() => state.floorTimer?.isPaused ? socket.emit('resumeTimer') : socket.emit('pauseTimer')}
-                onSetTime={(payload) => socket.emit('setSpeakingTime', payload)}
-            />
         </div>
     );
 }

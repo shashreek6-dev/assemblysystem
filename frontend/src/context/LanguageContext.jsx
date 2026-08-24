@@ -1,159 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 
-const customOverrides = {
-  "mp": "माननीय सांसद",
-  "member of parliament": "माननीय संसद सदस्य",
-  "opposition leader": "प्रमुख प्रतिपक्षी दलका नेता",
-  "cabinet minister": "माननीय मन्त्री",
-  "minister": "मन्त्री",
-  "prime minister": "सम्माननीय प्रधानमन्त्री",
-  "pm": "सम्माननीय प्रधानमन्त्री",
-  "speaker": "सम्माननीय सभामुख",
-  "deputy speaker": "माननीय उपसभामुख",
-  "secretary general": "महासचिव",
-  "member": "सदस्य",
-  "shrestha": "श्रेष्ठ",
-  "karki": "कार्की",
-  "bhattarai": "भट्टराई",
-  "adhikari": "अधिकारी",
-  "tamang": "तामाङ",
-  "gurung": "गुरुङ",
-  "pokharel": "पोखरेल",
-  "chettri": "क्षेत्री",
-  "chhetri": "क्षेत्री",
-  "kc": "केसी",
-  "bista": "बिष्ट",
-  "pandey": "पाण्डे",
-  "paudel": "पौडेल",
-  "rijal": "रिजाल",
-  "acharya": "आचार्य",
-  "nepal": "नेपाल",
-  "sharma": "शर्मा",
-  "thapa": "थापा",
-  "sampang": "साम्पाङ",
-  "shah": "शाह",
-  "neupane": "न्यौपाने",
-  "gautam": "गौतम",
-  "dhakal": "ढकाल",
-  "bhandari": "भण्डारी",
-  "sunya": "शून्य समय",
-  "aakasmik": "आकस्मिक समय",
-  "bishesh": "विशेष समय"
-};
-
-const consonantMap = [
-  { en: "ksha", ne: "क्ष" }, { en: "ksh", ne: "क्ष" }, { en: "gya", ne: "ज्ञ" }, 
-  { en: "tra", ne: "त्र" }, { en: "shri", ne: "श्री" }, { en: "shr", ne: "श्र" },
-  { en: "chha", ne: "छ" }, { en: "chh", ne: "छ" }, { en: "ch", ne: "च" },
-  { en: "kh", ne: "ख" }, { en: "gh", ne: "घ" }, { en: "ng", ne: "ङ" },
-  { en: "jh", ne: "झ" }, { en: "th", ne: "थ" }, { en: "dh", ne: "ध" },
-  { en: "ph", ne: "फ" }, { en: "bh", ne: "भ" }, { en: "sh", ne: "श" },
-  { en: "k", ne: "क" }, { en: "g", ne: "ग" }, { en: "j", ne: "ज" },
-  { en: "t", ne: "त" }, { en: "d", ne: "द" }, { en: "n", ne: "न" },
-  { en: "p", ne: "प" }, { en: "b", ne: "ब" }, { en: "m", ne: "म" },
-  { en: "y", ne: "य" }, { en: "r", ne: "र" }, { en: "l", ne: "ल" },
-  { en: "w", ne: "व" }, { en: "v", ne: "व" }, { en: "s", ne: "स" }, { en: "h", ne: "ह" }
-];
-
-const matraMap = [
-  { en: "aa", ne: "ा" }, { en: "ee", ne: "ी" }, { en: "oo", ne: "ू" },
-  { en: "ai", ne: "ै" }, { en: "au", ne: "ौ" }, { en: "a", ne: "" },
-  { en: "i", ne: "ि" }, { en: "u", ne: "ु" }, { en: "e", ne: "े" }, { en: "o", ne: "ो" }
-];
-
-const standaloneVowels = [
-  { en: "aa", ne: "आ" }, { en: "ee", ne: "ई" }, { en: "oo", ne: "ऊ" },
-  { en: "ai", ne: "ऐ" }, { en: "au", ne: "औ" }, { en: "a", ne: "अ" },
-  { en: "i", ne: "इ" }, { en: "u", ne: "उ" }, { en: "e", ne: "ए" }, { en: "o", ne: "ओ" }
-];
-
-const transliterateAnyWord = (word) => {
-  if (!word) return '';
-  const low = String(word).toLowerCase().trim();
-  if (customOverrides[low]) return customOverrides[low];
-
-  let res = '';
-  let i = 0;
-  let isStartOfSyllable = true;
-
-  while (i < low.length) {
-    if (isStartOfSyllable) {
-      let matchedVowel = false;
-      for (const v of standaloneVowels) {
-        if (low.startsWith(v.en, i)) {
-          res += v.ne;
-          i += v.en.length;
-          matchedVowel = true;
-          isStartOfSyllable = false;
-          break;
-        }
-      }
-      if (matchedVowel) continue;
-    }
-
-    let matchedConsonant = false;
-    for (const c of consonantMap) {
-      if (low.startsWith(c.en, i)) {
-        const consChar = c.ne;
-        i += c.en.length;
-        matchedConsonant = true;
-        isStartOfSyllable = false;
-
-        let matchedMatra = false;
-        for (const m of matraMap) {
-          if (low.startsWith(m.en, i)) {
-            res += consChar + m.ne;
-            i += m.en.length;
-            matchedMatra = true;
-            break;
-          }
-        }
-
-        if (!matchedMatra) {
-          if (i < low.length && /[a-z]/i.test(low[i])) {
-            res += consChar + "्";
-          } else {
-            res += consChar;
-          }
-        }
-        break;
-      }
-    }
-
-    if (!matchedConsonant) {
-      res += low[i];
-      i++;
-      isStartOfSyllable = false;
-    }
-  }
-
-  return res
-    .replace(/र्क्/g, "र्क")
-    .replace(/न्द्/g, "न्द")
-    .replace(/म्प्/g, "म्प")
-    .replace(/स्त्/g, "स्त")
-    .replace(/श्त्/g, "श्त");
-};
-
-const universalNepaliTransliterate = (text) => {
-  if (!text) return '';
-  const str = String(text).trim();
-  const low = str.toLowerCase();
-
-  if (customOverrides[low]) return customOverrides[low];
-
-  const tokens = str.split(/(\s+|[-&•,/]+)/);
-  return tokens.map(t => {
-    if (!t) return '';
-    const tLow = t.toLowerCase().trim();
-    if (tLow === '&') return 'तथा';
-    if (tLow === 'and') return 'र';
-    if (customOverrides[tLow]) return customOverrides[tLow];
-    if (/^[a-zA-Z.]+$/.test(t)) return transliterateAnyWord(t);
-    return t;
-  }).join('');
-};
-
 const translations = {
   en: {
     tabConsole: "Floor Console",
@@ -216,12 +62,13 @@ const translations = {
     nameCol: "Member Name",
     actionsCol: "Actions",
     noMembersMatch: "No permanent members found matching your search.",
+    addMemberBtn: "Add New Member",
     importTitle: "Import Speaker Roster (Excel / CSV)",
     importSubtitle: "Upload .xlsx / .xls / .csv file to automatically populate session agenda, topics, and floor queue",
     chooseFile: "Choose File",
     uploadAndQueue: "Upload & Auto-Queue Roster",
     uniqueId: "Unique ID",
-    speakerPortal: "Speaker Portal",
+    speakerPortal: "Member Speaker Portal",
     biometricSubtitle: "Biometric Verification & Floor Access",
     fullNamePlaceholder: "Full Name",
     designationPlaceholder: "Designation / Position (e.g. MP)",
@@ -253,14 +100,14 @@ const translations = {
     authSession: "Authenticate Session",
     authError: "Invalid Presiding Officer credentials.",
     connError: "Connection error. Ensure backend server is active.",
-    sunyaSamaya: "Sunya Samaya (Zero Hour)",
+    sunyaSamaya: "Sunne Samaya (Listening Time)",
     aakasmikSamaya: "Aakasmik Samaya (Urgent Hour)",
     bisheshSamaya: "Bishesh Samaya (Special Hour)",
     selectSessionCategory: "Select Parliamentary Speaking Slot",
-    aakasmikLimitReached: "You have already utilized your single speaking chance for this Aakasmik Samaya.",
+    aakasmikLimitReached: "You have already utilized your single speaking chance for this slot.",
     resetAakasmikBtn: "Reset Aakasmik Session Lockouts",
     topicClerkTitle: "Topic Clerk Console",
-    topicClerkSubtitle: "Live manual topic entry & Devanagari translation assignment for members",
+    topicClerkSubtitle: "Live topic entry & automated translation for members",
     saveTopicBtn: "Save & Broadcast Topic",
     workerConsoleTitle: "Parliamentary Operational Console",
     workerConsoleSubtitle: "Set speaker topics, configure time slots, and manage session lockouts",
@@ -277,9 +124,9 @@ const translations = {
     selectMemberLeftPrompt: "Select a member on the left",
     topicEnglishLabel: "Topic for Speaking (English)",
     topicEnglishPlaceholder: "e.g. Budget Allocation for Digital Governance",
-    topicNepaliLabel: "Topic for Speaking (Nepali)",
+    topicNepaliLabel: "वक्तव्य विषय (नेपाली)",
     topicNepaliPlaceholder: "उदा. डिजिटल सुशासनको लागि बजेट विनियोजन",
-    topicAutoTransHelper: "Leave blank to auto-transliterate from English topic.",
+    topicAutoTransHelper: "Leave blank to auto-translate from English topic.",
     saveSyncTopicBtn: "Save & Sync Topic",
     allocatingTimeFor: "Allocating Time for",
     quickPresetsLabel: "Quick Presets",
@@ -291,7 +138,7 @@ const translations = {
     sectionLockoutTitle: "Section Lockout Management",
     sectionLockoutSubtitle: "Once a member has spoken in a section, they cannot queue or speak in that section again until reset.",
     membersLockedOutText: "members currently locked out",
-    resetSunyaLockoutsBtn: "Reset Sunya Lockouts",
+    resetSunyaLockoutsBtn: "Reset Sunne Lockouts",
     resetAakasmikLockoutsBtn: "Reset Aakasmik Lockouts",
     resetBisheshLockoutsBtn: "Reset Bishesh Lockouts",
     resetAllThreeLockoutsBtn: "Reset Lockouts For All Three Sections",
@@ -299,6 +146,9 @@ const translations = {
     confirmResetAllLockouts: "Are you sure you want to reset speaking lockouts for ALL THREE sections? All members can speak again.",
     selectMemberFirstAlert: "Select a member from the list or queue first.",
     topicUpdatedAlert: "Topic updated successfully for",
+    hallScreen: "Public Hall Projector Display",
+    hallScreenSubtitle: "Open this clean view on the secondary screen or public hall projector",
+    openHallScreen: "Open Projector Display",
     timeUpdatedAlert: "Speaking time updated successfully for"
   },
   ne: {
@@ -362,6 +212,7 @@ const translations = {
     nameCol: "सदस्यको नाम",
     actionsCol: "कार्यहरू",
     noMembersMatch: "खोजी अनुसार कुनै सदस्यको विवरण भेटिएन।",
+    addMemberBtn: "नयाँ सदस्य थप्नुहोस्",
     importTitle: "वक्ता कार्यसूची आयात (एक्सेल / CSV)",
     importSubtitle: "बैठकको कार्यसूची, विषय र पालो क्रम स्वतः थप्न .xlsx / .xls / .csv फाइल अपलोड गर्नुहोस्",
     chooseFile: "फाइल छान्नुहोस्",
@@ -399,11 +250,11 @@ const translations = {
     authSession: "सत्र प्रमाणीकरण गर्नुहोस्",
     authError: "गलत विवरण प्रविष्ट गरियो।",
     connError: "सम्पर्क त्रुटि। सर्भर चालु छ कि छैन जाँच्नुहोस्।",
-    sunyaSamaya: "शून्य समय",
+    sunyaSamaya: "सुन्ने समय",
     aakasmikSamaya: "आकस्मिक समय",
     bisheshSamaya: "विशेष समय",
     selectSessionCategory: "संसदको समय स्लट छान्नुहोस्",
-    aakasmikLimitReached: "तपाईंले यस आकस्मिक समयमा बोल्ने १ पटकको अवसर लिइसक्नु भएको छ।",
+    aakasmikLimitReached: "तपाईंले यस समयमा बोल्ने १ पटकको अवसर लिइसक्नु भएको छ।",
     resetAakasmikBtn: "आकस्मिक समयको लकआउट रिसेट गर्नुहोस्",
     topicClerkTitle: "विषय प्रविष्टि डेस्क (Topic Clerk)",
     topicClerkSubtitle: "सदस्यहरूको विषय तथा नेपाली विवरण प्रत्यक्ष प्रविष्टि तथा संशोधन",
@@ -437,7 +288,7 @@ const translations = {
     sectionLockoutTitle: "सत्र लकआउट तथा पुनः पालो व्यवस्थापन",
     sectionLockoutSubtitle: "कुनै सत्रमा एकपटक बोलिसकेपछि पुनः पालो पाउन रिसेट गर्नुपर्ने व्यवस्था यहाँबाट नियन्त्रण गर्नुहोस्।",
     membersLockedOutText: "जना सदस्यले यस सत्रमा बोलिसकेका छन्",
-    resetSunyaLockoutsBtn: "शून्य समयको लकआउट रिसेट",
+    resetSunyaLockoutsBtn: "सुन्ने समयको लकआउट रिसेट",
     resetAakasmikLockoutsBtn: "आकस्मिक समयको लकआउट रिसेट",
     resetBisheshLockoutsBtn: "विशेष समयको लकआउट रिसेट",
     resetAllThreeLockoutsBtn: "तीनै सत्रको लकआउट एकैपटक रिसेट गर्नुहोस्",
@@ -445,6 +296,9 @@ const translations = {
     confirmResetAllLockouts: "के तपाईं तीनै वटै सत्रको लकआउट रिसेट गर्न निश्चित हुनुहुन्छ? सबै सदस्यले पुनः पालो माग्न पाउनेछन्।",
     selectMemberFirstAlert: "कृपया पहिले बायाँ सूचीबाट कुनै सदस्य छान्नुहोस्।",
     topicUpdatedAlert: "विषय सफलतापूर्वक सुरक्षित गरियो:",
+    hallScreen: "संसद् हल प्रोजेक्टर डिस्प्ले",
+    hallScreenSubtitle: "यो दृश्य दोस्रो स्क्रिन वा सार्वजनिक हल प्रोजेक्टरमा खोल्नुहोस्",
+    openHallScreen: "प्रोजेक्टर डिस्प्ले खोल्नुहोस्",
     timeUpdatedAlert: "समय सीमा सफलतापूर्वक निर्धारण गरियो:"
   }
 };
@@ -487,12 +341,12 @@ export const LanguageProvider = ({ children }) => {
     const neField = `${field}_ne`;
     const valNe = item[neField];
 
-    if (valNe && typeof valNe === 'string' && /[\u0900-\u097F]/.test(valNe)) {
+    // Priority: Genuine translated string from backend
+    if (valNe && typeof valNe === 'string' && valNe.trim() !== '') {
       return valNe;
     }
 
-    const textToConvert = item[field] || valNe || '';
-    return universalNepaliTransliterate(String(textToConvert));
+    return item[field] || '';
   };
 
   const currentDict = translations[lang] || translations.en;
@@ -504,16 +358,4 @@ export const LanguageProvider = ({ children }) => {
   );
 };
 
-export const useLanguage = () => {
-  const ctx = useContext(LanguageContext);
-  if (!ctx) {
-    return {
-      lang: 'en',
-      t: translations.en,
-      toggleLanguage: () => {},
-      toDevanagariDigits: (s) => String(s || ''),
-      getLocalizedText: (item, field) => (item && field ? item[field] || '' : '')
-    };
-  }
-  return ctx;
-};
+export const useLanguage = () => useContext(LanguageContext);

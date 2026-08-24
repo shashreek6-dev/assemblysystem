@@ -1,552 +1,594 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { socket } from '../socket';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageToggle from './LanguageToggle';
-import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 
 export default function SpeakerDashboard() {
+    const navigate = useNavigate();
     const { t, toDevanagariDigits, getLocalizedText } = useLanguage();
-    const [speaker, setSpeaker] = useState(() => {
-        return JSON.parse(localStorage.getItem('activeSpeaker') || 'null');
-    });
 
-    const [authMode, setAuthMode] = useState('id');
-    const [uniqueIdInput, setUniqueIdInput] = useState('');
-    const [name, setName] = useState('');
-    const [position, setPosition] = useState('');
-    const [interruptReason, setInterruptReason] = useState('Point of Order');
-    
-    // Active session tab selector: 'sunya' | 'aakasmik' | 'bishesh'
-    const [activeTab, setActiveTab] = useState('sunya');
-
-    // Individual duration states for each session
-    const [sessionDurations, setSessionDurations] = useState({
-        sunya: { preset: 3, customMins: '', customSecs: '' },
-        aakasmik: { preset: 3, customMins: '', customSecs: '' },
-        bishesh: { preset: 3, customMins: '', customSecs: '' }
-    });
-
-    const [queueData, setQueueData] = useState({ 
+    const [speaker, setSpeaker] = useState(null);
+    const [state, setState] = useState({
         activeSection: 'sunya',
-        queues: { sunya: [], aakasmik: [], bishesh: [] }, 
-        activeSpeaker: null, 
-        floorTimer: {},
+        queues: { sunya: [], aakasmik: [], bishesh: [] },
+        queue: [],
+        interruptions: [],
+        activeSpeaker: null,
+        floorTimer: { duration: 0, endsAt: null, remainingSeconds: 0, isPaused: false },
+        savedFloorSpeaker: null,
+        activeInterruption: null,
         spokenMembers: { sunya: [], aakasmik: [], bishesh: [] }
     });
+
+    const [selectedCategory, setSelectedCategory] = useState('sunya');
+    const [selectedMinutes, setSelectedMinutes] = useState(3);
+    const [selectedSeconds, setSelectedSeconds] = useState(0);
+    const [aakasmikTopicNe, setAakasmikTopicNe] = useState('');
+    const [interruptionReason, setInterruptionReason] = useState('Point of Order');
     const [remainingSecs, setRemainingSecs] = useState(0);
+    const [statusMessage, setStatusMessage] = useState('');
 
     useEffect(() => {
-        socket.on('queueUpdated', (data) => {
-            setQueueData(data);
-        });
+        const stored = localStorage.getItem('currentSpeaker');
+        if (!stored) {
+            navigate('/login');
+            return;
+        }
+        try {
+            const parsed = JSON.parse(stored);
+            setSpeaker(parsed);
+        } catch (e) {
+            navigate('/login');
+        }
+    }, [navigate]);
 
-        // Listen for live topic updates submitted from Worker console
-        socket.on('speakerTopicUpdated', ({ uniqueId, name: updatedName, topic, topic_ne }) => {
-            setSpeaker(prev => {
-                if (!prev) return prev;
-                const matchId = uniqueId && (prev.uniqueId === uniqueId || prev.unique_id === uniqueId);
-                const matchName = updatedName && prev.name?.toLowerCase() === updatedName.toLowerCase();
-                
-                if (matchId || matchName) {
-                    const updated = { ...prev, topic, topic_ne };
-                    localStorage.setItem('activeSpeaker', JSON.stringify(updated));
-                    return updated;
-                }
-                return prev;
-            });
-        });
+    useEffect(() => {
+        const handleQueueUpdate = (data) => {
+            if (data) {
+                setState(prev => ({
+                    ...prev,
+                    ...data,
+                    queues: data.queues || { sunya: [], aakasmik: [], bishesh: [] },
+                    interruptions: data.interruptions || [],
+                    floorTimer: data.floorTimer || { duration: 0, endsAt: null, remainingSeconds: 0, isPaused: false },
+                    savedFloorSpeaker: data.savedFloorSpeaker || null,
+                    activeInterruption: data.activeInterruption || null,
+                    spokenMembers: data.spokenMembers || { sunya: [], aakasmik: [], bishesh: [] }
+                }));
+            }
+        };
 
-        socket.on('requestRejected', (data) => {
-            alert(`⚠️ ${data.reason}`);
-        });
+        const handleRejected = (data) => {
+            if (data && data.reason) {
+                alert(`⚠️ ${data.reason}`);
+            }
+        };
+
+        socket.on('queueUpdated', handleQueueUpdate);
+        socket.on('requestRejected', handleRejected);
 
         return () => {
-            socket.off('queueUpdated');
-            socket.off('speakerTopicUpdated');
-            socket.off('requestRejected');
+            socket.off('queueUpdated', handleQueueUpdate);
+            socket.off('requestRejected', handleRejected);
         };
     }, []);
 
     useEffect(() => {
-        const timer = queueData.floorTimer;
-        if (!timer || !timer.endsAt || timer.isPaused) {
-            setRemainingSecs(timer?.remainingSeconds || 0);
+        const timer = state.floorTimer || {};
+        const { endsAt, isPaused, remainingSeconds } = timer;
+
+        if (isPaused) {
+            setRemainingSecs(remainingSeconds || 0);
             return;
         }
 
-        const interval = setInterval(() => {
-            const left = Math.max(0, Math.ceil((timer.endsAt - Date.now()) / 1000));
+        if (!endsAt) {
+            setRemainingSecs(0);
+            return;
+        }
+
+        const updateClock = () => {
+            const diffMs = endsAt - Date.now();
+            const left = Math.max(0, Math.ceil(diffMs / 1000));
             setRemainingSecs(left);
-            if (left <= 0) clearInterval(interval);
-        }, 500);
+        };
+
+        updateClock();
+        const interval = setInterval(updateClock, 50);
 
         return () => clearInterval(interval);
-    }, [queueData.floorTimer]);
+    }, [state.floorTimer]);
 
-    const handleUniqueIdLogin = async () => {
-        if (!uniqueIdInput.trim()) return alert(t.enterUniqueId);
-
-        try {
-            const res = await fetch('/api/speaker-id-login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ uniqueId: uniqueIdInput })
-            });
-            const data = await res.json();
-
-            if (res.ok && data.success) {
-                localStorage.setItem('activeSpeaker', JSON.stringify(data.speaker));
-                setSpeaker(data.speaker);
-            } else {
-                alert(data.error || 'Member ID not found.');
-            }
-        } catch (err) {
-            alert('Server connection error.');
-        }
+    const handleSignOut = () => {
+        localStorage.removeItem('currentSpeaker');
+        navigate('/login');
     };
 
-    const handleRegister = async () => {
-        if (!name || !position) return alert(t.fillNameAndDesig);
-        try {
-            const res = await fetch('/api/register-options', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, position })
-            });
-            const options = await res.json();
-            const attResp = await startRegistration({ optionsJSON: options });
-
-            const verifyRes = await fetch('/api/verify-registration', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ body: attResp })
-            });
-            const result = await verifyRes.json();
-
-            if (result.verified) {
-                const profile = { name, position };
-                localStorage.setItem('activeSpeaker', JSON.stringify(profile));
-                setSpeaker(profile);
-            }
-        } catch (err) {
-            alert('Biometric registration error: ' + err.message);
-        }
+    const isMatch = (spk1, spk2) => {
+        if (!spk1 || !spk2) return false;
+        const id1 = String(spk1.uniqueId || spk1.unique_id || '').toLowerCase().trim();
+        const id2 = String(spk2.uniqueId || spk2.unique_id || '').toLowerCase().trim();
+        if (id1 && id2 && id1 === id2) return true;
+        const n1 = String(spk1.name || '').toLowerCase().trim();
+        const n2 = String(spk2.name || '').toLowerCase().trim();
+        return Boolean(n1 && n2 && n1 === n2);
     };
 
-    const handleBiometricLogin = async () => {
-        try {
-            const res = await fetch('/api/auth-options');
-            const options = await res.json();
-            const asseResp = await startAuthentication({ optionsJSON: options });
-
-            const verifyRes = await fetch('/api/verify-auth', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ body: asseResp })
-            });
-            const result = await verifyRes.json();
-
-            if (result.verified) {
-                localStorage.setItem('activeSpeaker', JSON.stringify(result.speaker));
-                setSpeaker(result.speaker);
-            }
-        } catch (err) {
-            alert('Biometric authentication failed: ' + err.message);
-        }
+    const isLockedOut = (section) => {
+        if (!speaker) return false;
+        const list = state.spokenMembers?.[section] || [];
+        const idKey = String(speaker.uniqueId || speaker.unique_id || '').toLowerCase().trim();
+        const nameKey = String(speaker.name || '').toLowerCase().trim();
+        return (Boolean(idKey) && list.includes(idKey)) || (Boolean(nameKey) && list.includes(nameKey));
     };
 
-    const handleLogout = () => {
-        localStorage.removeItem('activeSpeaker');
-        setSpeaker(null);
-    };
+    const isFloorActive = state.activeSpeaker && isMatch(state.activeSpeaker, speaker);
+    const isInterruptionActive = state.activeInterruption && isMatch(state.activeInterruption.speaker, speaker);
+    const isPausedByInterruption = state.savedFloorSpeaker && isMatch(state.savedFloorSpeaker.speaker, speaker);
 
-    const handleRequestFloor = (category) => {
-        const dur = sessionDurations[category];
-        let mins = dur.preset;
-        let secs = 0;
+    const currentQueue = state.queues?.[selectedCategory] || [];
+    const queueIndex = currentQueue.findIndex(item => isMatch(item, speaker));
+    const isQueued = queueIndex !== -1;
+    const isInterruptionRequested = (state.interruptions || []).some(item => isMatch(item, speaker));
 
-        if (dur.preset === 'custom') {
-            mins = parseInt(dur.customMins || '0', 10);
-            secs = parseInt(dur.customSecs || '0', 10);
-            if (mins === 0 && secs === 0) return alert(t.selectDurationAlert);
+    const handleRequestFloor = (e) => {
+        e.preventDefault();
+        if (!speaker) return;
+
+        if (isLockedOut(selectedCategory)) {
+            return alert(t?.aakasmikLimitReached || 'तपाईंले यस स्लटमा बोलिसक्नु भएको छ।');
         }
+
+        const customTopic = (selectedCategory === 'aakasmik' && aakasmikTopicNe.trim())
+            ? aakasmikTopicNe.trim()
+            : (speaker.topic_ne || speaker.topic || 'आकस्मिक विषय');
 
         socket.emit('requestFloor', {
             speaker,
-            sectionCategory: category,
-            requestedMinutes: mins,
-            requestedSeconds: secs,
-            topic: speaker.topic || 'Floor Statement',
-            topic_ne: speaker.topic_ne || 'सदन वक्तव्य'
+            sectionCategory: selectedCategory,
+            requestedMinutes: selectedMinutes,
+            requestedSeconds: selectedSeconds,
+            topic: customTopic,
+            topic_ne: customTopic
         });
+
+        setStatusMessage('✅ तपाईंको बोल्ने अनुरोध दर्ता भयो।');
+        setTimeout(() => setStatusMessage(''), 4000);
     };
 
-    const setPresetTime = (category, mins) => {
-        setSessionDurations(prev => ({
-            ...prev,
-            [category]: { ...prev[category], preset: mins }
-        }));
+    const handleRaiseInterruption = (e) => {
+        e.preventDefault();
+        if (!speaker) return;
+
+        if (isLockedOut('aakasmik')) {
+            return alert(t?.aakasmikLimitReached || 'तपाईंले आकस्मिक समयमा भाग लिइसक्नु भएको छ।');
+        }
+
+        socket.emit('raiseInterruption', {
+            speaker,
+            reason: interruptionReason
+        });
+
+        setStatusMessage('🚨 नियमापत्ति अनुरोध दर्ता भयो।');
+        setTimeout(() => setStatusMessage(''), 4000);
     };
 
-    const setCustomMins = (category, val) => {
-        setSessionDurations(prev => ({
-            ...prev,
-            [category]: { ...prev[category], customMins: val }
-        }));
+    const formatClock = (seconds) => {
+        const total = Math.max(0, parseInt(seconds || 0, 10));
+        const m = String(Math.floor(total / 60)).padStart(2, '0');
+        const s = String(total % 60).padStart(2, '0');
+        return toDevanagariDigits(`${m}:${s}`);
     };
 
-    const setCustomSecs = (category, val) => {
-        setSessionDurations(prev => ({
-            ...prev,
-            [category]: { ...prev[category], customSecs: val }
-        }));
+    if (!speaker) return null;
+
+    const slots = [
+        { key: 'sunya', label: 'सुन्ने समय', enLabel: 'Sunne Samaya', icon: '⏳' },
+        { key: 'aakasmik', label: 'आकस्मिक समय', enLabel: 'Aakasmik', icon: '🚨' },
+        { key: 'bishesh', label: 'विशेष समय', enLabel: 'Bishesh', icon: '🌟' }
+    ];
+
+    const activeTopicDisplay = state.activeSpeaker?.topic_ne || state.activeSpeaker?.topic || speaker?.topic_ne || speaker?.topic;
+
+    const getMobileTimerColor = () => {
+        if (remainingSecs <= 30 && remainingSecs > 0) return '#dc2626';
+        if (remainingSecs <= 60 && remainingSecs > 30) return '#d97706';
+        return '#166534';
     };
 
-    const speakerIdentifier = speaker ? (speaker.uniqueId || speaker.unique_id || speaker.name).toLowerCase().trim() : '';
-
-    // Check lockout per section
-    const hasSpokenIn = (cat) => {
-        return queueData.spokenMembers?.[cat]?.includes(speakerIdentifier);
-    };
-
-    const isActive = speaker && queueData.activeSpeaker?.name.toLowerCase() === speaker.name.toLowerCase();
-
-    const getQueuePosition = (cat) => {
-        if (!speaker || !queueData.queues || !queueData.queues[cat]) return -1;
-        return queueData.queues[cat].findIndex(s => (s.uniqueId && s.uniqueId === (speaker.uniqueId || speaker.unique_id)) || s.name.toLowerCase() === speaker.name.toLowerCase());
-    };
-
-    const sunyaPos = getQueuePosition('sunya');
-    const aakasmikPos = getQueuePosition('aakasmik');
-    const bisheshPos = getQueuePosition('bishesh');
-
-    // View 1: Auth Screen
-    if (!speaker) {
-        return (
-            <div style={{ maxWidth: '420px', margin: '40px auto', background: '#fff', padding: '32px', borderRadius: '16px', border: '1px solid var(--border)', textAlign: 'center' }}>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '10px' }}>
-                    <LanguageToggle />
-                </div>
-                <div style={{ fontSize: '32px', marginBottom: '12px' }}>🏛️</div>
-                <h2 style={{ margin: '0 0 6px 0', fontSize: '20px' }}>{t.speakerPortal}</h2>
-                <p className="text-muted" style={{ margin: '0 0 24px 0' }}>{t.biometricSubtitle}</p>
-
-                {authMode === 'id' && (
-                    <div>
-                        <input 
-                            type="text" 
-                            placeholder={t.enterUniqueId} 
-                            value={uniqueIdInput} 
-                            onChange={(e) => setUniqueIdInput(e.target.value)}
-                            style={{ width: '100%', padding: '12px', marginBottom: '16px', border: '1px solid var(--border)', borderRadius: '8px', fontSize: '15px', fontWeight: 600 }}
-                        />
-                        <button className="btn-success" style={{ width: '100%', padding: '12px', fontSize: '15px' }} onClick={handleUniqueIdLogin}>
-                            🔑 {t.loginBtn}
-                        </button>
-                        <p style={{ marginTop: '16px', fontSize: '13px', cursor: 'pointer', color: 'var(--accent-blue)' }} onClick={() => setAuthMode('scan')}>
-                            {t.switchBio}
-                        </p>
-                    </div>
-                )}
-
-                {authMode === 'scan' && (
-                    <div>
-                        <button className="btn-success" style={{ width: '100%', padding: '12px', fontSize: '15px' }} onClick={handleBiometricLogin}>
-                            🧬 {t.scanBio}
-                        </button>
-                        <p style={{ marginTop: '12px', fontSize: '13px', cursor: 'pointer', color: 'var(--accent-blue)' }} onClick={() => setAuthMode('signup')}>
-                            {t.newMember}
-                        </p>
-                        <p style={{ marginTop: '8px', fontSize: '13px', cursor: 'pointer', color: '#64748b' }} onClick={() => setAuthMode('id')}>
-                            {t.switchId}
-                        </p>
-                    </div>
-                )}
-
-                {authMode === 'signup' && (
-                    <div>
-                        <input 
-                            type="text" 
-                            placeholder={t.fullNamePlaceholder} 
-                            value={name} 
-                            onChange={(e) => setName(e.target.value)}
-                            style={{ width: '100%', padding: '12px', marginBottom: '12px', border: '1px solid var(--border)', borderRadius: '8px' }}
-                        />
-                        <input 
-                            type="text" 
-                            placeholder={t.designationPlaceholder} 
-                            value={position} 
-                            onChange={(e) => setPosition(e.target.value)}
-                            style={{ width: '100%', padding: '12px', marginBottom: '16px', border: '1px solid var(--border)', borderRadius: '8px' }}
-                        />
-                        <button className="btn-success" style={{ width: '100%', padding: '12px' }} onClick={handleRegister}>
-                            {t.registerBio}
-                        </button>
-                        <p style={{ marginTop: '16px', fontSize: '13px', cursor: 'pointer', color: 'var(--accent-blue)' }} onClick={() => setAuthMode('id')}>
-                            {t.switchId}
-                        </p>
-                    </div>
-                )}
-            </div>
-        );
-    }
-
-    const currentTabDuration = sessionDurations[activeTab];
-    const currentTabQueuePos = getQueuePosition(activeTab);
-    const isCurrentTabLockedOut = hasSpokenIn(activeTab);
-
-    // View 2: Multi-Queue Floor Dashboard
     return (
-        <div style={{ maxWidth: '440px', margin: '30px auto', background: '#fff', padding: '24px', borderRadius: '16px', border: '1px solid var(--border)', textAlign: 'center' }}>
-            {/* Member Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                <span className="badge badge-live" style={{ fontSize: '12px', padding: '6px 14px' }}>
-                    {getLocalizedText(speaker, 'name')} • {getLocalizedText(speaker, 'position')}
-                </span>
-                <LanguageToggle />
-            </div>
-
-            {/* Currently Active Parliamentary Session Indicator */}
+        <div style={{
+            minHeight: '100vh',
+            width: '100%',
+            maxWidth: '100vw',
+            background: '#f8fafc',
+            color: '#0f172a',
+            padding: '12px',
+            margin: '0 auto',
+            boxSizing: 'border-box',
+            overflowX: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '12px',
+            fontFamily: 'system-ui, -apple-system, sans-serif'
+        }}>
+            {/* Header */}
             <div style={{
-                background: '#f1f5f9',
-                borderRadius: '8px',
-                padding: '8px 12px',
-                marginBottom: '12px',
-                fontSize: '12px',
-                fontWeight: 700,
-                color: '#334155',
+                background: '#ffffff',
+                borderRadius: '14px',
+                padding: '12px 14px',
+                border: '1.5px solid #e2e8f0',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
                 display: 'flex',
+                justifyContent: 'space-between',
                 alignItems: 'center',
-                justifyContent: 'center',
-                gap: '6px'
+                gap: '8px',
+                width: '100%',
+                boxSizing: 'border-box'
             }}>
-                <span>🏛️ Ongoing Floor Session:</span>
-                <strong style={{
-                    color: queueData.activeSection === 'sunya' ? '#2563eb' : queueData.activeSection === 'aakasmik' ? '#dc2626' : '#7c3aed'
+                <div style={{ minWidth: 0, flex: 1 }}>
+                    <h2 style={{
+                        margin: 0,
+                        fontSize: '16px',
+                        fontWeight: 900,
+                        color: '#0f172a',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis'
+                    }}>
+                        {getLocalizedText(speaker, 'name')}
+                    </h2>
+                    <span style={{
+                        fontSize: '11px',
+                        color: '#64748b',
+                        fontWeight: 700,
+                        display: 'block',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis'
+                    }}>
+                        {getLocalizedText(speaker, 'position')} • {toDevanagariDigits(speaker.uniqueId || speaker.unique_id || '')}
+                    </span>
+                </div>
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
+                    <LanguageToggle />
+                    <button
+                        onClick={handleSignOut}
+                        style={{
+                            background: '#fee2e2',
+                            color: '#dc2626',
+                            border: 'none',
+                            borderRadius: '6px',
+                            padding: '6px 10px',
+                            fontSize: '11px',
+                            fontWeight: 800,
+                            cursor: 'pointer'
+                        }}
+                    >
+                        {t?.signOut || 'Sign Out'}
+                    </button>
+                </div>
+            </div>
+
+            {/* Paused by Priority Interruption Card */}
+            {isPausedByInterruption && (
+                <div style={{
+                    background: '#fffbeb',
+                    border: '2.5px solid #f59e0b',
+                    borderRadius: '16px',
+                    padding: '20px 12px',
+                    textAlign: 'center',
+                    boxShadow: '0 4px 16px rgba(245, 158, 11, 0.15)',
+                    width: '100%',
+                    boxSizing: 'border-box'
                 }}>
-                    {queueData.activeSection === 'sunya' ? 'Sunya Samaya' : queueData.activeSection === 'aakasmik' ? 'Aakasmik Samaya' : 'Bishesh Samaya'}
-                </strong>
-            </div>
-
-            {/* Topic Display Box */}
-            <div style={{ background: '#f8fafc', padding: '12px', borderRadius: '10px', fontSize: '13px', color: '#0f172a', marginBottom: '16px', border: '1px solid var(--border)', textAlign: 'left' }}>
-                📌 <strong>{t.topic}:</strong>{' '}
-                <span style={{ color: '#2563eb', fontWeight: 700 }}>
-                    {getLocalizedText(speaker, 'topic') || 'Floor Statement'}
-                </span>
-            </div>
-
-            {/* Active Live Speaking Banner */}
-            {isActive && (
-                <div style={{ background: '#f0fdf4', border: '2px solid #bbf7d0', borderRadius: '12px', padding: '16px', margin: '0 0 16px 0' }}>
-                    <div style={{ color: '#166534', fontWeight: 800, fontSize: '13px', textTransform: 'uppercase' }}>
-                        {t.youHaveTheFloor} ({queueData.activeSpeaker?.sessionCategory?.toUpperCase() || 'SESSION'})
+                    <span style={{
+                        background: '#fef3c7',
+                        color: '#b45309',
+                        fontSize: '11px',
+                        fontWeight: 900,
+                        padding: '4px 12px',
+                        borderRadius: '9999px'
+                    }}>
+                        ⏸️ नियमापत्तिका कारण तपाईंको समय अस्थायी रोकिएको छ
+                    </span>
+                    <div style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'monospace', color: '#b45309', margin: '10px 0', lineHeight: 1 }}>
+                        {formatClock(state.savedFloorSpeaker.remainingSeconds)}
                     </div>
-                    <div style={{ fontSize: '44px', fontWeight: 900, fontFamily: 'monospace', color: remainingSecs <= 60 ? '#854d0e' : '#166534' }}>
-                        {remainingSecs <= 0 ? t.expired : toDevanagariDigits(`${String(Math.floor(remainingSecs / 60)).padStart(2, '0')}:${String(remainingSecs % 60).padStart(2, '0')}`)}
+                    <div style={{ fontSize: '12px', color: '#92400e', fontWeight: 800 }}>
+                        सदनको नियमापत्ति समाप्त हुनासाथ तपाईंको बाँकी समय पुनः सुरु हुनेछ।
                     </div>
                 </div>
             )}
 
-            {/* Status Across All 3 Sessions */}
-            <div style={{ background: '#f8fafc', border: '1px solid var(--border)', borderRadius: '12px', padding: '12px', marginBottom: '16px', textAlign: 'left' }}>
-                <div style={{ fontSize: '11px', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', marginBottom: '8px' }}>
-                    📋 Live Status Across All 3 Sessions
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
-                    {/* Sunya Status */}
-                    <div 
-                        onClick={() => setActiveTab('sunya')}
-                        style={{ 
-                            background: hasSpokenIn('sunya') ? '#f1f5f9' : sunyaPos !== -1 ? '#eff6ff' : '#fff', 
-                            border: `2px solid ${activeTab === 'sunya' ? '#2563eb' : sunyaPos !== -1 ? '#93c5fd' : '#e2e8f0'}`, 
-                            borderRadius: '8px', 
-                            padding: '8px 4px', 
-                            textAlign: 'center',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        <div style={{ fontSize: '11px', fontWeight: 700, color: '#2563eb' }}>⏳ {t.sunyaSamaya?.split(' ')[0] || 'Sunya'}</div>
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: hasSpokenIn('sunya') ? '#64748b' : sunyaPos !== -1 ? '#1d4ed8' : '#94a3b8', marginTop: '2px' }}>
-                            {hasSpokenIn('sunya') ? 'Spoken' : sunyaPos !== -1 ? `#${toDevanagariDigits(sunyaPos + 1)} in line` : 'Not Queued'}
-                        </div>
+            {/* Active Floor Speaker Card */}
+            {isFloorActive && !isPausedByInterruption && (
+                <div style={{
+                    background: remainingSecs <= 30 ? '#fef2f2' : (remainingSecs <= 60 ? '#fffbeb' : '#f0fdf4'),
+                    border: `2.5px solid ${remainingSecs <= 30 ? '#f87171' : (remainingSecs <= 60 ? '#f59e0b' : '#86efac')}`,
+                    borderRadius: '16px',
+                    padding: '20px 12px',
+                    textAlign: 'center',
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
+                    width: '100%',
+                    boxSizing: 'border-box'
+                }}>
+                    <span style={{
+                        background: remainingSecs <= 30 ? '#fee2e2' : (remainingSecs <= 60 ? '#fef3c7' : '#dcfce7'),
+                        color: remainingSecs <= 30 ? '#dc2626' : (remainingSecs <= 60 ? '#b45309' : '#166534'),
+                        fontSize: '11px',
+                        fontWeight: 900,
+                        padding: '4px 12px',
+                        borderRadius: '9999px'
+                    }}>
+                        🎤 {t?.youHaveTheFloor || 'तपाईंको बोल्ने पालो आएको छ'}
+                    </span>
+                    <div style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'monospace', color: getMobileTimerColor(), margin: '10px 0', lineHeight: 1 }}>
+                        {formatClock(remainingSecs)}
                     </div>
-
-                    {/* Aakasmik Status */}
-                    <div 
-                        onClick={() => setActiveTab('aakasmik')}
-                        style={{ 
-                            background: hasSpokenIn('aakasmik') ? '#f1f5f9' : aakasmikPos !== -1 ? '#fef2f2' : '#fff', 
-                            border: `2px solid ${activeTab === 'aakasmik' ? '#dc2626' : aakasmikPos !== -1 ? '#fca5a5' : '#e2e8f0'}`, 
-                            borderRadius: '8px', 
-                            padding: '8px 4px', 
-                            textAlign: 'center',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        <div style={{ fontSize: '11px', fontWeight: 700, color: '#dc2626' }}>🚨 {t.aakasmikSamaya?.split(' ')[0] || 'Aakasmik'}</div>
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: hasSpokenIn('aakasmik') ? '#64748b' : aakasmikPos !== -1 ? '#b91c1c' : '#94a3b8', marginTop: '2px' }}>
-                            {hasSpokenIn('aakasmik') ? 'Spoken' : aakasmikPos !== -1 ? `#${toDevanagariDigits(aakasmikPos + 1)} in line` : 'Not Queued'}
+                    {activeTopicDisplay && (
+                        <div style={{ fontSize: '12px', fontWeight: 800, color: '#0f172a', background: '#ffffff', padding: '4px 10px', borderRadius: '8px', display: 'inline-block', border: '1px solid #cbd5e1', maxWidth: '90%', wordBreak: 'break-word' }}>
+                            📌 {activeTopicDisplay}
                         </div>
-                    </div>
-
-                    {/* Bishesh Status */}
-                    <div 
-                        onClick={() => setActiveTab('bishesh')}
-                        style={{ 
-                            background: hasSpokenIn('bishesh') ? '#f1f5f9' : bisheshPos !== -1 ? '#f5f3ff' : '#fff', 
-                            border: `2px solid ${activeTab === 'bishesh' ? '#7c3aed' : bisheshPos !== -1 ? '#c4b5fd' : '#e2e8f0'}`, 
-                            borderRadius: '8px', 
-                            padding: '8px 4px', 
-                            textAlign: 'center',
-                            cursor: 'pointer'
-                        }}
-                    >
-                        <div style={{ fontSize: '11px', fontWeight: 700, color: '#7c3aed' }}>🌟 {t.bisheshSamaya?.split(' ')[0] || 'Bishesh'}</div>
-                        <div style={{ fontSize: '12px', fontWeight: 800, color: hasSpokenIn('bishesh') ? '#64748b' : bisheshPos !== -1 ? '#6d28d9' : '#94a3b8', marginTop: '2px' }}>
-                            {hasSpokenIn('bishesh') ? 'Spoken' : bisheshPos !== -1 ? `#${toDevanagariDigits(bisheshPos + 1)} in line` : 'Not Queued'}
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            {/* Session Queue Card */}
-            <div style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px', marginBottom: '20px', textAlign: 'left' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                    <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 800, color: activeTab === 'sunya' ? '#2563eb' : activeTab === 'aakasmik' ? '#dc2626' : '#7c3aed' }}>
-                        {activeTab === 'sunya' ? `⏳ ${t.sunyaSamaya}` : activeTab === 'aakasmik' ? `🚨 ${t.aakasmikSamaya}` : `🌟 ${t.bisheshSamaya}`}
-                    </h3>
-                    {currentTabQueuePos !== -1 && (
-                        <span style={{ fontSize: '12px', fontWeight: 700, color: '#16a34a', background: '#dcfce7', padding: '2px 8px', borderRadius: '6px' }}>
-                            ✓ Queued (#{toDevanagariDigits(currentTabQueuePos + 1)})
-                        </span>
                     )}
                 </div>
+            )}
 
-                {/* Lockout Notice if already spoken in this section */}
-                {isCurrentTabLockedOut ? (
-                    <div style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', padding: '12px', borderRadius: '8px', fontSize: '12px', textAlign: 'center' }}>
-                        ⚠️ You have already spoken in this section during today's session.
+            {/* Priority Interrupter Active Card */}
+            {isInterruptionActive && (
+                <div style={{
+                    background: '#fff5f5',
+                    border: '2.5px solid #fca5a5',
+                    borderRadius: '16px',
+                    padding: '20px 12px',
+                    textAlign: 'center',
+                    boxShadow: '0 4px 16px rgba(220,38,38,0.15)',
+                    width: '100%',
+                    boxSizing: 'border-box'
+                }}>
+                    <span style={{ background: '#fee2e2', color: '#b91c1c', fontSize: '11px', fontWeight: 900, padding: '4px 12px', borderRadius: '9999px' }}>
+                        🚨 {t?.interruptionActiveBadge || 'विशेष नियमापत्ति / हस्तक्षेप सक्रिय'}
+                    </span>
+                    <div style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'monospace', color: '#dc2626', margin: '10px 0', lineHeight: 1 }}>
+                        {formatClock(remainingSecs)}
                     </div>
-                ) : currentTabQueuePos !== -1 ? (
-                    <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '14px', textAlign: 'center' }}>
-                        <div style={{ color: '#166534', fontWeight: 800, fontSize: '14px' }}>
-                            {t.inQueueForFloor}
-                        </div>
-                        <div style={{ color: '#15803d', fontSize: '13px', marginTop: '4px' }}>
-                            {t.positionInLine}: <strong>#{toDevanagariDigits(currentTabQueuePos + 1)}</strong>
-                        </div>
-                        <p className="text-muted" style={{ margin: '8px 0 0 0', fontSize: '11px' }}>
-                            You are active in this queue. You can switch tabs to queue in other sessions as well.
-                        </p>
+                    <div style={{ fontSize: '12px', fontWeight: 800, color: '#991b1b' }}>
+                        {state.activeInterruption?.reason || 'Point of Order'}
                     </div>
-                ) : (
-                    <div>
-                        <label className="text-muted" style={{ fontWeight: 700, textTransform: 'uppercase', fontSize: '11px' }}>
-                            ⏱️ {t.selectTime}
+                </div>
+            )}
+
+            {/* Queue Position */}
+            {isQueued && !isFloorActive && !isPausedByInterruption && (
+                <div style={{
+                    background: '#eff6ff',
+                    border: '1.5px solid #bfdbfe',
+                    borderRadius: '14px',
+                    padding: '14px',
+                    textAlign: 'center',
+                    width: '100%',
+                    boxSizing: 'border-box'
+                }}>
+                    <span style={{ color: '#1d4ed8', fontSize: '11px', fontWeight: 900 }}>
+                        ⏳ {t?.inQueueForFloor || 'पालो सूचीमा दर्ता भएको छ'}
+                    </span>
+                    <h3 style={{ margin: '4px 0 0 0', fontSize: '18px', fontWeight: 900, color: '#1e40af' }}>
+                        {t?.positionInLine || 'पालो क्रम'}: #{toDevanagariDigits(queueIndex + 1)}
+                    </h3>
+                </div>
+            )}
+
+            {statusMessage && (
+                <div style={{ background: '#ecfdf5', color: '#065f46', border: '1px solid #a7f3d0', padding: '10px', borderRadius: '8px', textAlign: 'center', fontSize: '12px', fontWeight: 800 }}>
+                    {statusMessage}
+                </div>
+            )}
+
+            {/* Request Floor Card */}
+            <div style={{
+                background: '#ffffff',
+                borderRadius: '16px',
+                border: '1.5px solid #e2e8f0',
+                padding: '16px 14px',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.02)',
+                width: '100%',
+                boxSizing: 'border-box'
+            }}>
+                <h3 style={{ margin: '0 0 12px 0', fontSize: '15px', fontWeight: 900, color: '#0f172a' }}>
+                    🙋 {t?.requestFloor || 'बोल्नको लागि पालो माग्नुहोस्'}
+                </h3>
+
+                <form onSubmit={handleRequestFloor}>
+                    <div style={{ marginBottom: '14px' }}>
+                        <label style={{ fontSize: '11px', fontWeight: 800, color: '#475569', display: 'block', marginBottom: '6px' }}>
+                            {t?.selectSessionCategory || 'संसदको समय स्लट छान्नुहोस्'}
                         </label>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', margin: '6px 0 12px 0' }}>
-                            {[1, 3, 5].map((mins) => (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', width: '100%', boxSizing: 'border-box' }}>
+                            {slots.map(cat => {
+                                const locked = isLockedOut(cat.key);
+                                const isSelected = selectedCategory === cat.key;
+                                return (
+                                    <button
+                                        key={cat.key}
+                                        type="button"
+                                        disabled={locked}
+                                        onClick={() => setSelectedCategory(cat.key)}
+                                        style={{
+                                            padding: '8px 4px',
+                                            borderRadius: '8px',
+                                            border: isSelected ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                                            background: isSelected ? '#eff6ff' : (locked ? '#f1f5f9' : '#ffffff'),
+                                            color: locked ? '#94a3b8' : (isSelected ? '#1d4ed8' : '#334155'),
+                                            fontWeight: 800,
+                                            fontSize: '11px',
+                                            cursor: locked ? 'not-allowed' : 'pointer',
+                                            textAlign: 'center',
+                                            boxSizing: 'border-box',
+                                            minWidth: 0
+                                        }}
+                                    >
+                                        <div style={{ fontSize: '16px' }}>{cat.icon}</div>
+                                        <div style={{ marginTop: '2px', lineHeight: 1.1, wordBreak: 'break-word', fontSize: '11px' }}>
+                                            {cat.label}
+                                        </div>
+                                        {locked && <span style={{ fontSize: '9px', color: '#dc2626', display: 'block', marginTop: '2px' }}>बोलिसकेको</span>}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {selectedCategory === 'aakasmik' && (
+                        <div style={{
+                            marginBottom: '14px',
+                            background: '#fef2f2',
+                            border: '1.5px solid #fecaca',
+                            borderRadius: '10px',
+                            padding: '10px 12px'
+                        }}>
+                            <label style={{
+                                fontSize: '12px',
+                                fontWeight: 900,
+                                color: '#991b1b',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                marginBottom: '6px'
+                            }}>
+                                ✍️ आकस्मिक वक्तव्य विषय (नेपालीमा प्रविष्ट गर्नुहोस्):
+                            </label>
+                            <input
+                                type="text"
+                                value={aakasmikTopicNe}
+                                onChange={(e) => setAakasmikTopicNe(e.target.value)}
+                                placeholder="उदा. बाढी पहिरोको क्षति र उद्धार सम्बन्धमा..."
+                                style={{
+                                    width: '100%',
+                                    padding: '10px 12px',
+                                    borderRadius: '8px',
+                                    border: '1.5px solid #f87171',
+                                    fontSize: '13px',
+                                    fontWeight: 700,
+                                    color: '#0f172a',
+                                    background: '#ffffff',
+                                    boxSizing: 'border-box'
+                                }}
+                            />
+                        </div>
+                    )}
+
+                    <div style={{ marginBottom: '14px' }}>
+                        <label style={{ fontSize: '11px', fontWeight: 800, color: '#475569', display: 'block', marginBottom: '6px' }}>
+                            {t?.requestedTime || 'माग गरिएको समय'}
+                        </label>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', width: '100%', boxSizing: 'border-box' }}>
+                            {[1, 3, 5].map(mins => (
                                 <button
                                     key={mins}
                                     type="button"
-                                    className="btn-secondary"
+                                    onClick={() => { setSelectedMinutes(mins); setSelectedSeconds(0); }}
                                     style={{
-                                        padding: '8px',
-                                        fontWeight: 700,
-                                        fontSize: '12px',
-                                        background: currentTabDuration.preset === mins ? 'var(--accent-blue, #2563eb)' : '#fff',
-                                        color: currentTabDuration.preset === mins ? '#fff' : 'inherit'
+                                        padding: '10px 4px',
+                                        borderRadius: '8px',
+                                        border: (selectedMinutes === mins && selectedSeconds === 0) ? '2px solid #16a34a' : '1px solid #cbd5e1',
+                                        background: (selectedMinutes === mins && selectedSeconds === 0) ? '#f0fdf4' : '#ffffff',
+                                        color: (selectedMinutes === mins && selectedSeconds === 0) ? '#15803d' : '#334155',
+                                        fontWeight: 900,
+                                        fontSize: '13px',
+                                        cursor: 'pointer',
+                                        boxSizing: 'border-box'
                                     }}
-                                    onClick={() => setPresetTime(activeTab, mins)}
                                 >
-                                    {toDevanagariDigits(mins)} {t.oneMin?.replace(/[1१]/g, '').trim() || 'Min'}
+                                    {toDevanagariDigits(mins)} {t?.minutesLabel || 'मिनेट'}
                                 </button>
                             ))}
-                            <button
-                                type="button"
-                                className="btn-secondary"
-                                style={{
-                                    padding: '8px',
-                                    fontWeight: 700,
-                                    fontSize: '12px',
-                                    background: currentTabDuration.preset === 'custom' ? 'var(--accent-blue, #2563eb)' : '#fff',
-                                    color: currentTabDuration.preset === 'custom' ? '#fff' : 'inherit'
-                                }}
-                                onClick={() => setPresetTime(activeTab, 'custom')}
-                            >
-                                {t.customTime}
-                            </button>
                         </div>
-
-                        {currentTabDuration.preset === 'custom' && (
-                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '14px' }}>
-                                <input 
-                                    type="number" 
-                                    placeholder="0" 
-                                    min="0" 
-                                    value={currentTabDuration.customMins} 
-                                    onChange={(e) => setCustomMins(activeTab, e.target.value)}
-                                    style={{ width: '60px', padding: '8px', textAlign: 'center', border: '1px solid var(--border)', borderRadius: '6px' }}
-                                />
-                                <span style={{ fontSize: '12px', fontWeight: 600 }}>m</span>
-                                <input 
-                                    type="number" 
-                                    placeholder="0" 
-                                    min="0" 
-                                    max="59" 
-                                    value={currentTabDuration.customSecs} 
-                                    onChange={(e) => setCustomSecs(activeTab, e.target.value)}
-                                    style={{ width: '60px', padding: '8px', textAlign: 'center', border: '1px solid var(--border)', borderRadius: '6px' }}
-                                />
-                                <span style={{ fontSize: '12px', fontWeight: 600 }}>s</span>
-                            </div>
-                        )}
-
-                        <button 
-                            className="btn-success" 
-                            style={{ 
-                                width: '100%', 
-                                padding: '12px', 
-                                fontSize: '14px',
-                                fontWeight: 800,
-                                background: activeTab === 'sunya' ? '#2563eb' : activeTab === 'aakasmik' ? '#dc2626' : '#7c3aed'
-                            }} 
-                            onClick={() => handleRequestFloor(activeTab)}
-                        >
-                            ➕ {t.requestFloor} ({t[activeTab === 'sunya' ? 'sunyaSamaya' : activeTab === 'aakasmik' ? 'aakasmikSamaya' : 'bisheshSamaya']?.split(' ')[0]})
-                        </button>
                     </div>
-                )}
+
+                    <button
+                        type="submit"
+                        disabled={isLockedOut(selectedCategory) || isQueued || isFloorActive}
+                        style={{
+                            width: '100%',
+                            padding: '12px',
+                            borderRadius: '10px',
+                            border: 'none',
+                            background: (isLockedOut(selectedCategory) || isQueued || isFloorActive) ? '#cbd5e1' : '#2563eb',
+                            color: '#ffffff',
+                            fontWeight: 900,
+                            fontSize: '14px',
+                            cursor: (isLockedOut(selectedCategory) || isQueued || isFloorActive) ? 'not-allowed' : 'pointer',
+                            boxSizing: 'border-box'
+                        }}
+                    >
+                        {isQueued ? `✓ ${t?.inQueueForFloor || 'पालोमा दर्ता भइसकेको'}` : (t?.requestFloor || 'बोल्नको लागि पालो माग्नुहोस्')}
+                    </button>
+                </form>
             </div>
 
-            <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '16px 0' }} />
+            {/* Interruption Card */}
+            <div style={{
+                background: '#ffffff',
+                borderRadius: '16px',
+                border: '1.5px solid #fee2e2',
+                padding: '16px 14px',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.02)',
+                width: '100%',
+                boxSizing: 'border-box'
+            }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                    <h3 style={{ margin: 0, fontSize: '14px', fontWeight: 900, color: '#dc2626' }}>
+                        🚨 {t?.raiseInterruption || 'नियमापत्ति दर्ता गर्नुहोस्'}
+                    </h3>
+                    <span style={{ fontSize: '10px', fontWeight: 800, background: '#fee2e2', color: '#b91c1c', padding: '2px 6px', borderRadius: '4px' }}>
+                        १ मिनेट सीमा
+                    </span>
+                </div>
 
-            {/* Interruption / Point of Order Panel */}
-            <div style={{ textAlign: 'left', marginBottom: '12px' }}>
-                <label className="text-muted" style={{ fontWeight: 700, textTransform: 'uppercase', fontSize: '11px' }}>{t.priorityReason}</label>
-                <select 
-                    value={interruptReason} 
-                    onChange={(e) => setInterruptReason(e.target.value)}
-                    style={{ width: '100%', padding: '10px', marginTop: '6px', border: '1px solid var(--border)', borderRadius: '8px' }}
-                >
-                    <option value="Point of Order">{t.pointOfOrder}</option>
-                    <option value="Direct Rebuttal">{t.directRebuttal}</option>
-                    <option value="Point of Information">{t.pointOfInfo}</option>
-                </select>
+                <form onSubmit={handleRaiseInterruption}>
+                    <div style={{ marginBottom: '12px' }}>
+                        <select
+                            value={interruptionReason}
+                            onChange={(e) => setInterruptionReason(e.target.value)}
+                            style={{
+                                width: '100%',
+                                padding: '10px 8px',
+                                borderRadius: '8px',
+                                border: '1.5px solid #fca5a5',
+                                fontSize: '12px',
+                                fontWeight: 700,
+                                background: '#ffffff',
+                                color: '#991b1b',
+                                boxSizing: 'border-box'
+                            }}
+                        >
+                            <option value="Point of Order">⚠️ {t?.pointOfOrder || 'नियमापत्ति (Point of Order)'}</option>
+                            <option value="Direct Rebuttal / Argument">⚡ {t?.directRebuttal || 'प्रत्यक्ष खण्डन / प्रतिवाद'}</option>
+                            <option value="Point of Information">ℹ️ {t?.pointOfInfo || 'जानकारीको विषय (Point of Information)'}</option>
+                        </select>
+                    </div>
+
+                    <button
+                        type="submit"
+                        disabled={isLockedOut('aakasmik') || isInterruptionRequested || isInterruptionActive}
+                        style={{
+                            width: '100%',
+                            padding: '12px',
+                            borderRadius: '10px',
+                            border: 'none',
+                            background: (isLockedOut('aakasmik') || isInterruptionRequested || isInterruptionActive) ? '#cbd5e1' : '#dc2626',
+                            color: '#ffffff',
+                            fontWeight: 900,
+                            fontSize: '13px',
+                            cursor: (isLockedOut('aakasmik') || isInterruptionRequested || isInterruptionActive) ? 'not-allowed' : 'pointer',
+                            boxSizing: 'border-box'
+                        }}
+                    >
+                        {isInterruptionRequested ? '🚨 नियमापत्ति स्वीकृतिको प्रतीक्षामा' : (t?.raiseInterruption || 'नियमापत्ति दर्ता गर्नुहोस्')}
+                    </button>
+                </form>
             </div>
-            <button 
-                className="btn-danger" 
-                style={{ width: '100%', padding: '12px' }} 
-                disabled={hasSpokenIn('aakasmik')}
-                onClick={() => socket.emit('raiseInterruption', { speaker, reason: interruptReason })}
-            >
-                {hasSpokenIn('aakasmik') ? 'आकस्मिक अवसर प्रयोग भइसकेको छ' : t.raiseInterruption}
-            </button>
-
-            <button className="btn-secondary" style={{ width: '100%', marginTop: '16px' }} onClick={handleLogout}>
-                {t.signOut}
-            </button>
         </div>
     );
 }

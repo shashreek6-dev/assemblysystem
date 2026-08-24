@@ -12,6 +12,7 @@
   "license": "ISC",
   "dependencies": {
     "@simplewebauthn/server": "^13.3.2",
+    "cors": "^2.8.6",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
     "multer": "^2.2.0",

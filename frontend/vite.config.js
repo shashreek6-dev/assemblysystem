@@ -4,18 +4,8 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
+    host: true,
     port: 5173,
-    host: '0.0.0.0', // Allow external connections (mobile & devtunnels)
-    allowedHosts: true, // Allow devtunnel domain headers
-    proxy: {
-      '/api': {
-        target: 'http://localhost:3000',
-        changeOrigin: true,
-      },
-      '/socket.io': {
-        target: 'http://localhost:3000',
-        ws: true,
-      },
-    },
-  },
+    allowedHosts: ['.devtunnels.ms', 'localhost']
+  }
 });
