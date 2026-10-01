@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { socket } from '../socket';
+import { socket, getEstimatedServerNow } from '../socket';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageToggle from './LanguageToggle';
 
@@ -36,8 +36,7 @@ export default function SpeakerDashboard() {
             return;
         }
         try {
-            const parsed = JSON.parse(stored);
-            setSpeaker(parsed);
+            setSpeaker(JSON.parse(stored));
         } catch (e) {
             navigate('/login');
         }
@@ -60,20 +59,27 @@ export default function SpeakerDashboard() {
         };
 
         const handleRejected = (data) => {
-            if (data && data.reason) {
-                alert(`⚠️ ${data.reason}`);
+            if (data && data.reason) alert(`⚠️ ${data.reason}`);
+        };
+
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible') {
+                socket.emit('requestStateSync');
             }
         };
 
         socket.on('queueUpdated', handleQueueUpdate);
         socket.on('requestRejected', handleRejected);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
 
         return () => {
             socket.off('queueUpdated', handleQueueUpdate);
             socket.off('requestRejected', handleRejected);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
         };
     }, []);
 
+    // Synchronized countdown using server-compensated timestamp
     useEffect(() => {
         const timer = state.floorTimer || {};
         const { endsAt, isPaused, remainingSeconds } = timer;
@@ -89,13 +95,14 @@ export default function SpeakerDashboard() {
         }
 
         const updateClock = () => {
-            const diffMs = endsAt - Date.now();
+            const serverNow = getEstimatedServerNow();
+            const diffMs = endsAt - serverNow;
             const left = Math.max(0, Math.ceil(diffMs / 1000));
             setRemainingSecs(left);
         };
 
         updateClock();
-        const interval = setInterval(updateClock, 50);
+        const interval = setInterval(updateClock, 100);
 
         return () => clearInterval(interval);
     }, [state.floorTimer]);
@@ -157,6 +164,17 @@ export default function SpeakerDashboard() {
         setTimeout(() => setStatusMessage(''), 4000);
     };
 
+    const handleCancelRequest = () => {
+        if (!speaker) return;
+        socket.emit('cancelFloorRequest', {
+            uniqueId: speaker.uniqueId || speaker.unique_id,
+            name: speaker.name,
+            sectionCategory: selectedCategory
+        });
+        setStatusMessage('ℹ️ तपाईंको अनुरोध रद्द गरिएको छ।');
+        setTimeout(() => setStatusMessage(''), 4000);
+    };
+
     const handleRaiseInterruption = (e) => {
         e.preventDefault();
         if (!speaker) return;
@@ -165,11 +183,7 @@ export default function SpeakerDashboard() {
             return alert(t?.aakasmikLimitReached || 'तपाईंले आकस्मिक समयमा भाग लिइसक्नु भएको छ।');
         }
 
-        socket.emit('raiseInterruption', {
-            speaker,
-            reason: interruptionReason
-        });
-
+        socket.emit('raiseInterruption', { speaker, reason: interruptionReason });
         setStatusMessage('🚨 नियमापत्ति अनुरोध दर्ता भयो।');
         setTimeout(() => setStatusMessage(''), 4000);
     };
@@ -228,44 +242,16 @@ export default function SpeakerDashboard() {
                 boxSizing: 'border-box'
             }}>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                    <h2 style={{
-                        margin: 0,
-                        fontSize: '16px',
-                        fontWeight: 900,
-                        color: '#0f172a',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis'
-                    }}>
+                    <h2 style={{ margin: 0, fontSize: '16px', fontWeight: 900, color: '#0f172a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {getLocalizedText(speaker, 'name')}
                     </h2>
-                    <span style={{
-                        fontSize: '11px',
-                        color: '#64748b',
-                        fontWeight: 700,
-                        display: 'block',
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis'
-                    }}>
+                    <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 700, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {getLocalizedText(speaker, 'position')} • {toDevanagariDigits(speaker.uniqueId || speaker.unique_id || '')}
                     </span>
                 </div>
                 <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
                     <LanguageToggle />
-                    <button
-                        onClick={handleSignOut}
-                        style={{
-                            background: '#fee2e2',
-                            color: '#dc2626',
-                            border: 'none',
-                            borderRadius: '6px',
-                            padding: '6px 10px',
-                            fontSize: '11px',
-                            fontWeight: 800,
-                            cursor: 'pointer'
-                        }}
-                    >
+                    <button onClick={handleSignOut} style={{ background: '#fee2e2', color: '#dc2626', border: 'none', borderRadius: '6px', padding: '6px 10px', fontSize: '11px', fontWeight: 800, cursor: 'pointer' }}>
                         {t?.signOut || 'Sign Out'}
                     </button>
                 </div>
@@ -283,14 +269,7 @@ export default function SpeakerDashboard() {
                     width: '100%',
                     boxSizing: 'border-box'
                 }}>
-                    <span style={{
-                        background: '#fef3c7',
-                        color: '#b45309',
-                        fontSize: '11px',
-                        fontWeight: 900,
-                        padding: '4px 12px',
-                        borderRadius: '9999px'
-                    }}>
+                    <span style={{ background: '#fef3c7', color: '#b45309', fontSize: '11px', fontWeight: 900, padding: '4px 12px', borderRadius: '9999px' }}>
                         ⏸️ नियमापत्तिका कारण तपाईंको समय अस्थायी रोकिएको छ
                     </span>
                     <div style={{ fontSize: '56px', fontWeight: 900, fontFamily: 'monospace', color: '#b45309', margin: '10px 0', lineHeight: 1 }}>
@@ -359,7 +338,7 @@ export default function SpeakerDashboard() {
                 </div>
             )}
 
-            {/* Queue Position */}
+            {/* Queue Position with Cancel Option */}
             {isQueued && !isFloorActive && !isPausedByInterruption && (
                 <div style={{
                     background: '#eff6ff',
@@ -373,9 +352,26 @@ export default function SpeakerDashboard() {
                     <span style={{ color: '#1d4ed8', fontSize: '11px', fontWeight: 900 }}>
                         ⏳ {t?.inQueueForFloor || 'पालो सूचीमा दर्ता भएको छ'}
                     </span>
-                    <h3 style={{ margin: '4px 0 0 0', fontSize: '18px', fontWeight: 900, color: '#1e40af' }}>
+                    <h3 style={{ margin: '4px 0', fontSize: '18px', fontWeight: 900, color: '#1e40af' }}>
                         {t?.positionInLine || 'पालो क्रम'}: #{toDevanagariDigits(queueIndex + 1)}
                     </h3>
+                    <button
+                        type="button"
+                        onClick={handleCancelRequest}
+                        style={{
+                            background: '#fee2e2',
+                            color: '#dc2626',
+                            border: '1px solid #fecaca',
+                            borderRadius: '6px',
+                            padding: '6px 14px',
+                            fontSize: '11px',
+                            fontWeight: 800,
+                            cursor: 'pointer',
+                            marginTop: '6px'
+                        }}
+                    >
+                        ✕ अनुरोध रद्द गर्नुहोस् (Withdraw Request)
+                    </button>
                 </div>
             )}
 
@@ -447,15 +443,7 @@ export default function SpeakerDashboard() {
                             borderRadius: '10px',
                             padding: '10px 12px'
                         }}>
-                            <label style={{
-                                fontSize: '12px',
-                                fontWeight: 900,
-                                color: '#991b1b',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                marginBottom: '6px'
-                            }}>
+                            <label style={{ fontSize: '12px', fontWeight: 900, color: '#991b1b', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px' }}>
                                 ✍️ आकस्मिक वक्तव्य विषय (नेपालीमा प्रविष्ट गर्नुहोस्):
                             </label>
                             <input
@@ -463,17 +451,7 @@ export default function SpeakerDashboard() {
                                 value={aakasmikTopicNe}
                                 onChange={(e) => setAakasmikTopicNe(e.target.value)}
                                 placeholder="उदा. बाढी पहिरोको क्षति र उद्धार सम्बन्धमा..."
-                                style={{
-                                    width: '100%',
-                                    padding: '10px 12px',
-                                    borderRadius: '8px',
-                                    border: '1.5px solid #f87171',
-                                    fontSize: '13px',
-                                    fontWeight: 700,
-                                    color: '#0f172a',
-                                    background: '#ffffff',
-                                    boxSizing: 'border-box'
-                                }}
+                                style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1.5px solid #f87171', fontSize: '13px', fontWeight: 700, color: '#0f172a', background: '#ffffff', boxSizing: 'border-box' }}
                             />
                         </div>
                     )}

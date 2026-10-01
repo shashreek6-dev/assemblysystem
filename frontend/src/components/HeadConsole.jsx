@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { socket } from '../socket';
+import { socket, getEstimatedServerNow } from '../socket';
 import { useLanguage } from '../context/LanguageContext';
 import LanguageToggle from './LanguageToggle';
 import MemberDirectoryTab from './MemberDirectoryTab';
@@ -88,6 +88,7 @@ export default function HeadConsole() {
         }
     }, [activeTab, fetchSpeakerStats]);
 
+    // Synchronized countdown using server-compensated timestamp
     useEffect(() => {
         const timer = state.floorTimer || {};
         const { endsAt, isPaused, remainingSeconds } = timer;
@@ -103,13 +104,14 @@ export default function HeadConsole() {
         }
 
         const updateClock = () => {
-            const diffMs = endsAt - Date.now();
+            const serverNow = getEstimatedServerNow();
+            const diffMs = endsAt - serverNow;
             const left = Math.max(0, Math.ceil(diffMs / 1000));
             setRemainingSecs(left);
         };
 
         updateClock();
-        const interval = setInterval(updateClock, 50);
+        const interval = setInterval(updateClock, 100);
 
         return () => clearInterval(interval);
     }, [state.floorTimer]);
@@ -331,7 +333,7 @@ export default function HeadConsole() {
             {/* TAB 1: FLOOR CONSOLE */}
             {activeTab === 'floor' && (
                 <>
-                    {/* Active Interruption Alert Banner with Resume Original Speaker Button */}
+                    {/* Active Interruption Alert Banner */}
                     {isInterruption && (
                         <div style={{
                             background: '#fff5f5',

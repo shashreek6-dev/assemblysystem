@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { socket } from '../socket';
+import React, { useState, useEffect, useRef } from 'react';
+import { socket, getEstimatedServerNow } from '../socket';
 import { useLanguage } from '../context/LanguageContext';
 
 export default function Display() {
@@ -15,6 +15,51 @@ export default function Display() {
     });
 
     const [remainingSecs, setRemainingSecs] = useState(0);
+    const audioContextRef = useRef(null);
+    const hasWarnedOneMin = useRef(false);
+
+    // Parliamentary Web Audio API Gong Synthesizer
+    const playGong = (type = 'chime') => {
+        try {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return;
+            if (!audioContextRef.current) audioContextRef.current = new AudioCtx();
+            const ctx = audioContextRef.current;
+            if (ctx.state === 'suspended') ctx.resume();
+
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+
+            if (type === 'warning') {
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+                gain.gain.setValueAtTime(0.3, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2);
+                osc.start();
+                osc.stop(ctx.currentTime + 1.2);
+            } else if (type === 'expired') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(440, ctx.currentTime);
+                gain.gain.setValueAtTime(0.5, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 2.0);
+                osc.start();
+                osc.stop(ctx.currentTime + 2.0);
+            } else if (type === 'interruption') {
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(700, ctx.currentTime);
+                osc.frequency.setValueAtTime(850, ctx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.2, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.8);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.8);
+            }
+        } catch (e) {
+            console.error('Audio chime error:', e);
+        }
+    };
 
     useEffect(() => {
         const handleQueueUpdate = (data) => {
@@ -31,12 +76,16 @@ export default function Display() {
         };
 
         socket.on('queueUpdated', handleQueueUpdate);
+        socket.on('playGongAlert', (type) => playGong(type));
         socket.emit('requestStateSync');
 
-        return () => socket.off('queueUpdated', handleQueueUpdate);
+        return () => {
+            socket.off('queueUpdated', handleQueueUpdate);
+            socket.off('playGongAlert');
+        };
     }, []);
 
-    // 50ms sub-second polling loop
+    // Synchronized countdown using server-compensated timestamp
     useEffect(() => {
         const timer = state.floorTimer || {};
         const { endsAt, isPaused, remainingSeconds } = timer;
@@ -48,16 +97,24 @@ export default function Display() {
 
         if (!endsAt) {
             setRemainingSecs(0);
+            hasWarnedOneMin.current = false;
             return;
         }
 
         const updateClock = () => {
-            const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+            const serverNow = getEstimatedServerNow();
+            const diffMs = endsAt - serverNow;
+            const left = Math.max(0, Math.ceil(diffMs / 1000));
             setRemainingSecs(left);
+
+            if (left === 60 && !hasWarnedOneMin.current) {
+                playGong('warning');
+                hasWarnedOneMin.current = true;
+            }
         };
 
         updateClock();
-        const interval = setInterval(updateClock, 50);
+        const interval = setInterval(updateClock, 100);
 
         return () => clearInterval(interval);
     }, [state.floorTimer]);
@@ -166,7 +223,6 @@ export default function Display() {
                                 : (speaker ? (t?.floorSessionActive || 'संसद बैठक सक्रिय') : (t?.noSpeaker || 'हाल कुनै वक्ता छैनन्'))}
                         </span>
 
-                        {/* Preserved Paused Original Speaker Sub-banner */}
                         {isInterruption && state.savedFloorSpeaker?.speaker && (
                             <div style={{
                                 background: '#fffbeb',
@@ -351,7 +407,7 @@ export default function Display() {
                                     {aggregatedQueue.map((item, idx) => (
                                         <div key={idx} style={{
                                             background: '#1e293b',
-                                            border: '1.5px solid #334155',
+                                            border: '1px solid #334155',
                                             borderRadius: '12px',
                                             padding: '10px 14px',
                                             display: 'flex',
